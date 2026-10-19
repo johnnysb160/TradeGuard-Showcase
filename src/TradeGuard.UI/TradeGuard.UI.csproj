@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk.Razor">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.AspNetCore.Components.Web" Version="10.0.11" />
+    <PackageReference Include="Microsoft.Extensions.Hosting.Abstractions" Version="10.0.12" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- O EA viaja dentro do programa: o TradeGuard instala e compila no MT5 sozinho. -->
+    <EmbeddedResource Include="..\..\mql5\TradeGuardBridge.mq5" LogicalName="TradeGuardBridge.mq5" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\TradeGuard.Domain\TradeGuard.Domain.csproj" />
+    <ProjectReference Include="..\TradeGuard.Bridge\TradeGuard.Bridge.csproj" />
+    <ProjectReference Include="..\TradeGuard.Infrastructure\TradeGuard.Infrastructure.csproj" />
+  </ItemGroup>
+
+</Project>

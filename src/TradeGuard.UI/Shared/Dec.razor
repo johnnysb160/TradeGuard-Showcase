@@ -1,0 +1,20 @@
+@using System.Globalization
+
+<div class="mb-2">
+    <label class="form-label small mb-0" title="@Hint">@Label@(Hint is null ? "" : " ⓘ")</label>
+    <input type="text" inputmode="decimal" class="form-control form-control-sm"
+           value="@Value.ToString(CultureInfo.InvariantCulture)" @onchange="OnChange" />
+</div>
+
+@code {
+    [Parameter] public string Label { get; set; } = "";
+    [Parameter] public string? Hint { get; set; }
+    [Parameter] public decimal Value { get; set; }
+    [Parameter] public EventCallback<decimal> ValueChanged { get; set; }
+
+    // Aceita "7,5" e "7.5".
+    private Task OnChange(ChangeEventArgs e) =>
+        decimal.TryParse(e.Value?.ToString()?.Replace(',', '.'), NumberStyles.Number, CultureInfo.InvariantCulture, out var v)
+            ? ValueChanged.InvokeAsync(v)
+            : Task.CompletedTask;
+}

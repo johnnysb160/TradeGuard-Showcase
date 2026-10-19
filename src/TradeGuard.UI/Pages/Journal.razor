@@ -1,0 +1,205 @@
+@page "/diario"
+@using TradeGuard.Infrastructure
+@inject JournalStore Store
+@inject IDesktopShell Shell
+@inject TradingEngine Engine
+
+<PageTitle>Diário · TradeGuard</PageTitle>
+
+<div class="d-flex justify-content-between align-items-start">
+    <div><h1 class="tg-title">Diário</h1><div class="tg-subtitle">Cada trade registrado automaticamente. Anote o motivo da entrada para aprender com ele.</div></div>
+    <button class="btn btn-ghost btn-sm" disabled="@(_trades.Count == 0)" @onclick="Export">Exportar CSV</button>
+</div>
+
+@if (_stats is { } s)
+{
+    <div class="tg-note @(s.Count < TradeStatistics.MinimumSample ? "" : s.Expectancy > 0 ? "ok" : "bad") mb-3">@s.Verdict</div>
+
+    <div class="row g-2 mb-3">
+        <Stat Title="Resultado" Value="@($"R$ {s.NetPnl:0.00}")" Hint="Soma de todos os trades." />
+        <Stat Title="Taxa de acerto" Value="@($"{s.WinRate}%")" Hint="% de trades que deram lucro. Sozinho não diz nada: depende do payoff." />
+        <Stat Title="Payoff" Value="@(s.Payoff == decimal.MaxValue ? "∞" : s.Payoff.ToString("0.00"))" Hint="Ganho médio ÷ perda média. 2 = quando ganha, ganha o dobro do que perde quando perde." />
+        <Stat Title="Expectativa" Value="@($"R$ {s.Expectancy:0.00} · {s.ExpectancyR:0.00}R")" Hint="Quanto você ganha (ou perde) em média por trade. R = múltiplos do risco inicial." />
+        <Stat Title="Fator de lucro" Value="@(s.ProfitFactor == decimal.MaxValue ? "∞" : s.ProfitFactor.ToString("0.00"))" Hint="Total ganho ÷ total perdido. Acima de 1 = lucrativo." />
+        <Stat Title="Drawdown máx." Value="@($"R$ {s.MaxDrawdown:0.00}")" Hint="Maior queda do pico ao fundo do seu resultado acumulado." />
+        <Stat Title="MFE médio" Value="@ByAsset(t => t.MfePoints)" Hint="Quanto o preço andou a seu favor, em média, em pontos de cada ativo (WDO e WIN têm escalas diferentes). Se é bem maior que seu alvo, o alvo está curto." />
+        <Stat Title="MAE médio" Value="@ByAsset(t => t.MaePoints)" Hint="Quanto andou contra você, em média, em pontos de cada ativo. Ajuda a calibrar o stop." />
+    </div>
+
+    @if (_equity.Count > 1)
+    {
+        <div class="tg-card mb-3"><div class="tg-section" title="Resultado acumulado trade a trade.">Curva de capital ⓘ</div>
+        <svg viewBox="0 0 600 120" class="w-100" style="max-height:140px" role="img" aria-label="Curva de capital">
+            <line x1="0" x2="600" y1="@Y(0)" y2="@Y(0)" stroke="var(--tg-border-strong)" stroke-dasharray="4 4" />
+            <polyline fill="none" stroke="var(--tg-accent)" stroke-width="2" stroke-linejoin="round" points="@Points()" />
+        </svg>
+        </div>
+    }
+
+    @if (s.PnlByHour.Count > 0)
+    {
+        <div class="small mb-3 num">
+            <span class="tg-label me-2" title="Onde você ganha e onde perde ao longo do dia.">Por horário ⓘ</span>
+            @foreach (var (hour, pnl) in s.PnlByHour)
+            {
+                <span class="me-3 @(pnl >= 0 ? "pos" : "neg")">@(hour)h R$ @pnl.ToString("0")</span>
+            }
+        </div>
+    }
+
+    <div class="tg-card mb-3">
+        <div class="tg-section" title="Cada setup medido separado. Com 30 trades e resultado positivo ele pode ir para o automático.">Por setup ⓘ</div>
+        <table class="table table-sm small align-middle mb-0">
+            <thead><tr><th>Setup</th><th>Trades</th><th>Acerto</th><th>Payoff</th><th>Expectativa</th><th>Situação</th></tr></thead>
+            <tbody>
+                @foreach (var (name, st) in BySetup())
+                {
+                    <tr>
+                        <td><b>@name</b></td>
+                        <td>@st.Count</td>
+                        <td>@st.WinRate%</td>
+                        <td>@(st.Payoff == decimal.MaxValue ? "∞" : st.Payoff.ToString("0.00"))</td>
+                        <td class="@(st.Expectancy >= 0 ? "pos" : "neg")">R$ @st.Expectancy.ToString("0.00")</td>
+                        <td>@(name == "Manual" ? "—" : st.IsValidated ? "✔ amostra local positiva" : $"amostra pequena/fraca ({st.Count}/{TradeStatistics.MinimumSample})")</td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    </div>
+
+    @if (_replay is { } r)
+    {
+        <div class="tg-card mb-3" data-test="teste-setups">
+            <div class="tg-section" title="Os candles reais passam pelo mesmo código do robô ao vivo, com as suas regras de hoje (stop, alvo, break-even, horários). Não é garantia: com menos de 30 sinais não dá para concluir nada.">Teste dos setups nos candles reais ⓘ</div>
+            @if (r.Trades.Count == 0)
+            {
+                <div class="small muted">Nenhum sinal em @r.Sessions pregão(ões) de candles guardados. O histórico cresce sozinho a cada dia.</div>
+            }
+            else
+            {
+                <div class="small mb-2">
+                    Em <b>@r.Sessions pregões</b> (@r.From?.ToString("dd/MM") a @r.To?.ToString("dd/MM")), com stop @Engine.State.Settings.StopPoints e alvo @Engine.State.Settings.TargetPoints:
+                    <b>@r.Trades.Count sinais</b>, @r.Wins no lucro,
+                    saldo <b class="@(r.NetPoints >= 0 ? "pos" : "neg")">@r.NetPoints.ToString("+0.0;-0.0") pts (R$ @((r.NetPoints * 10).ToString("+0;-0")))</b>.
+                    <span class="muted">@(r.Trades.Count < TradeStatistics.MinimumSample ? $"Amostra pequena ({r.Trades.Count}/{TradeStatistics.MinimumSample}): ainda não prova nada, para bem ou para mal." : r.NetPoints > 0 ? "Resultado positivo na amostra." : "Resultado negativo: os setups não estão funcionando neste mercado.")</span>
+                </div>
+                <table class="table table-sm small align-middle mb-0">
+                    <thead><tr><th>Quando</th><th>Setup</th><th>Lado</th><th>Entrada</th><th>Saída</th><th>Pts</th></tr></thead>
+                    <tbody>
+                        @foreach (var t in r.Trades.OrderByDescending(t => t.EntryUtc).Take(12))
+                        {
+                            <tr>
+                                <td>@B3Clock.ToB3(t.EntryUtc).ToString("dd/MM HH:mm")</td>
+                                <td>@t.Setup</td>
+                                <td>@(t.Side == Side.Buy ? "C" : "V")</td>
+                                <td>@t.Entry.ToString("0.0")</td>
+                                <td>@t.Exit</td>
+                                <td class="@(t.Points >= 0 ? "pos" : "neg")">@t.Points.ToString("+0.0;-0.0")</td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            }
+        </div>
+    }
+
+    <div class="tg-card"><div class="table-responsive">
+        <table class="table table-sm small align-middle mb-0">
+            <thead>
+                <tr>
+                    <th>Dia</th><th>Lado</th><th>Ctr</th><th>Entrada</th><th>Saída</th><th>Pts</th><th>R$</th>
+                    <th title="Resultado em múltiplos do risco. -1R = perdeu o stop cheio.">R ⓘ</th><th>Setup / nota</th>
+                    <th title="Tira o trade das estatísticas (ex.: preço absurdo do simulador no leilão). Prejuízo continua contando nas travas.">ⓘ</th>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (var t in _trades.OrderByDescending(t => t.OpenedAtUtc))
+                {
+                    <tr style="@(t.Excluded ? "opacity:.45;text-decoration:line-through" : "")" title="@t.Source">
+                        <td>@B3Clock.ToB3(t.OpenedAtUtc).ToString("dd/MM HH:mm")</td>
+                        <td>@(t.Side == Side.Buy ? "C" : "V")</td>
+                        <td>@t.Contracts</td>
+                        <td>@t.EntryPrice.ToString("0.0")</td>
+                        <td>@t.ExitPrice.ToString("0.0")</td>
+                        <td>@t.PnlPoints.ToString("+0.0;-0.0")</td>
+                        <td class="@(t.PnlMoney >= 0 ? "pos" : "neg")">@t.PnlMoney.ToString("0.00")</td>
+                        <td title="@(t.InitialRiskMoney > 0 ? "" : "Sem risco inicial registrado (trade importado do MT5): R não se aplica.")">@(t.InitialRiskMoney > 0 ? t.RMultiple.ToString("0.0") : "—")</td>
+                        <td style="min-width: 220px">
+                            @if (t.Setup is not null) { <span class="tg-chip me-1">@t.Setup</span> }
+                            <input class="form-control form-control-sm d-inline-block" style="width:auto;min-width:180px" placeholder="ex.: pullback, rompimento, errei…"
+                                   value="@t.Notes" @onchange="e => SaveNote(t, e.Value?.ToString())" />
+                        </td>
+                        <td>
+                            <button class="btn btn-chip" style="text-decoration:none" @onclick="() => ToggleExcluded(t)">
+                                @(t.Excluded ? "Considerar" : "Desconsiderar")
+                            </button>
+                        </td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    </div></div>
+}
+
+@code {
+    private List<TradeRecord> _trades = [];
+    private TradeStatistics? _stats;
+    private List<decimal> _equity = [];
+
+    protected override async Task OnInitializedAsync()
+    {
+        _trades = await Store.AllTradesAsync();
+        Recalculate();
+        _replay = await Task.Run(() => SetupReplay.Run(CandleArchive.Load(), Engine.State.Settings));
+    }
+
+    private ReplayResult? _replay;
+
+    private IEnumerable<(string Name, TradeStatistics Stats)> BySetup() =>
+        _trades.GroupBy(t => t.Setup ?? "Manual")
+            .OrderBy(g => g.Key == "Manual")
+            .ThenBy(g => g.Key)
+            .Select(g => (g.Key, TradeStatistics.From(g)));
+
+    // Pontos de WDO e WIN não se somam: média separada por ativo.
+    private string ByAsset(Func<TradeRecord, decimal> points) => string.Join(" · ",
+        _trades.Where(t => !t.Excluded).GroupBy(t => t.Symbol.Length >= 3 ? t.Symbol[..3].ToUpperInvariant() : t.Symbol)
+            .OrderBy(g => g.Key).Select(g => $"{g.Key} {g.Average(points):0.#}")) is { Length: > 0 } text ? text + " pts" : "—";
+
+    private void Recalculate()
+    {
+        _stats = TradeStatistics.From(_trades);
+        decimal acc = 0;
+        // Mesma ordem do drawdown: o resultado entra na conta quando o trade fecha.
+        _equity = [0, .. _trades.Where(t => !t.Excluded).OrderBy(t => t.ClosedAtUtc).Select(t => acc += t.PnlMoney)];
+    }
+
+    private async Task ToggleExcluded(TradeRecord t)
+    {
+        t.Excluded = !t.Excluded;
+        await Store.SetExcludedAsync(t.Id, t.Excluded);
+        Recalculate();
+        Engine.Poke(); // o dia recalcula os limites sem este trade (prejuízo continua contando)
+    }
+
+    private Task Export() =>
+        Shell.SaveFileAsync($"tradeguard-diario-{DateTime.Now:yyyyMMdd}.csv", "CSV (*.csv)|*.csv", JournalCsv.Build(_trades));
+
+    private async Task SaveNote(TradeRecord t, string? note)
+    {
+        t.Notes = note;
+        await Store.UpdateTradeNotesAsync(t.Id, t.Setup, note);
+    }
+
+    private decimal Min => Math.Min(0, _equity.Min());
+    private decimal Max => Math.Max(0, _equity.Max());
+
+    private string Y(decimal v)
+    {
+        var range = Max - Min == 0 ? 1 : Max - Min;
+        return (110 - (v - Min) / range * 100).ToString("0.0", System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    private string Points() => string.Join(" ", _equity.Select((v, i) =>
+        $"{(i * 600m / (_equity.Count - 1)).ToString("0.0", System.Globalization.CultureInfo.InvariantCulture)},{Y(v)}"));
+}

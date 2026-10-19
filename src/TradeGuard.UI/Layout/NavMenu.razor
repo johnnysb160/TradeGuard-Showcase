@@ -1,0 +1,63 @@
+@implements IDisposable
+@inject TradingEngine Engine
+@inject IDesktopShell Shell
+
+<aside class="tg-side">
+    <div class="tg-brand">
+        <BrandMark />
+        <span>TradeGuard</span>
+    </div>
+
+    <nav class="tg-nav">
+        <NavLink href="" Match="NavLinkMatch.All" title="Painel">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l3-7 4 14 3-7h4" /></svg>
+            <span>Painel</span>
+        </NavLink>
+        <NavLink href="diario" title="Diário">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19V5M4 19h16" /><path d="M8 15l3-4 3 2 5-6" /></svg>
+            <span>Diário</span>
+        </NavLink>
+        <NavLink href="regras" title="Regras">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 3v5c0 4.5-3 8.3-7 10-4-1.7-7-5.5-7-10V6l7-3z" /><path d="M9 12l2 2 4-4" /></svg>
+            <span>Regras</span>
+        </NavLink>
+        <NavLink href="conexao" title="Conexão MT5">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 7H7a5 5 0 000 10h2M15 7h2a5 5 0 010 10h-2M8 12h8" /></svg>
+            <span>Conexão MT5</span>
+        </NavLink>
+        <NavLink href="verificacao" title="Verificação: tudo o que o robô faz e se está funcionando">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3 8-8" /><path d="M20 12v6a2 2 0 01-2 2H6a2 2 0 01-2-2V6a2 2 0 012-2h9" /></svg>
+            <span>Verificação</span>
+        </NavLink>
+    </nav>
+
+    <div class="tg-side-foot">
+        @{ var s = Engine.State; }
+        <div class="tg-conn" title="@(s.Connected ? $"{s.Connection?.Server} · conta {s.Connection?.Account}" : "Aguardando o EA no MT5")">
+            <span class="tg-dot sm" style="--tone:@(s.Connected ? "var(--tg-buy)" : "var(--tg-sell)")"></span>
+            <span class="tg-label-text">
+                @if (s.Connected && s.Connection is { } c)
+                {
+                    <b>@c.Symbol</b> <span>· @(c.IsDemo ? "simulador" : "real")</span>
+                }
+                else
+                {
+                    <span>MT5 desconectado</span>
+                }
+            </span>
+        </div>
+        <div class="form-check form-switch m-0" title="Mantém a janela por cima do MT5.">
+            <input class="form-check-input" type="checkbox" role="switch" id="topmost" checked="@Shell.Topmost"
+                   @onchange="e => Shell.Topmost = e.Value is true" />
+            <label class="form-check-label tg-label-text" for="topmost">Sempre visível</label>
+        </div>
+    </div>
+</aside>
+
+@code {
+    protected override void OnInitialized() => Engine.Changed += OnChanged;
+
+    private void OnChanged() => InvokeAsync(StateHasChanged);
+
+    public void Dispose() => Engine.Changed -= OnChanged;
+}

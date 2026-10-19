@@ -1,0 +1,74 @@
+@page "/conexao"
+@implements IDisposable
+@using TradeGuard.Bridge
+@inject TradingEngine Engine
+@inject BridgeOptions Options
+@inject BridgeKey Key
+@inject IDesktopShell Shell
+
+<PageTitle>Conexão MT5 · TradeGuard</PageTitle>
+
+@{ var s = Engine.State; }
+
+<h1 class="tg-title">Conexão MT5</h1>
+<div class="tg-subtitle">O TradeGuard prepara e abre o MT5 sozinho. Esta tela é só para conferir.</div>
+
+<div class="tg-status @(s.Connected ? "success" : "")">
+    <span class="tg-dot @(s.Connected ? "live" : "")"></span>
+    <div>
+        @if (s.Connection is { } c && s.Connected)
+        {
+            <div class="tg-status-head">Conectado</div>
+            <div class="tg-status-detail">Conta @c.Account · @c.Server · @c.Symbol</div>
+        }
+        else
+        {
+            <div class="tg-status-head">Aguardando o MT5</div>
+            <div class="tg-status-detail">Canal local <code>\\.\pipe\@Options.PipeName</code> aberto. Siga os passos abaixo.</div>
+        }
+    </div>
+</div>
+
+<div class="row g-3">
+    <div class="col-12 col-lg-7">
+        <div class="tg-card h-100">
+            <div class="tg-section">Automático</div>
+            <ol class="tg-steps">
+                <li>Encontra o MT5 instalado neste PC.</li>
+                <li>Instala, atualiza e compila o EA, com a chave já preenchida.</li>
+                <li>Abre o MT5 (perfil <strong>TradeGuard</strong>) com o gráfico, o EA e o Algotrading ligados.</li>
+                <li>Troca sozinho para o contrato vigente do mini dólar quando o atual está para vencer.</li>
+                <li>Reabre o MT5 se ele fechar e reinicia se o EA ficar sem conectar.</li>
+            </ol>
+            <div class="small muted">Nada disso precisa ser feito à mão. O registro de cada passo fica em Painel → Detalhes.</div>
+        </div>
+    </div>
+    <div class="col-12 col-lg-5">
+        <div class="tg-card h-100">
+            <div class="tg-section" title="Senha que só o seu MT5 e este programa conhecem. Impede outro programa do PC de mandar ordens.">Chave da ponte ⓘ</div>
+            <div class="input-group">
+                <input class="form-control font-monospace" readonly value="@(_show ? Key.Hex : new string('•', 28))" />
+                <button class="btn btn-ghost" @onclick="() => _show = !_show">@(_show ? "Ocultar" : "Mostrar")</button>
+            </div>
+            <button class="btn btn-primary w-100 mt-2" @onclick="Copy">@(_copied ? "Copiada ✓" : "Copiar chave")</button>
+            <div class="small muted mt-3">Guardada cifrada (DPAPI) no seu usuário do Windows. Não compartilhe.</div>
+        </div>
+    </div>
+</div>
+
+@code {
+    private bool _show;
+    private bool _copied;
+
+    protected override void OnInitialized() => Engine.Changed += OnChanged;
+
+    private void OnChanged() => InvokeAsync(StateHasChanged);
+
+    public void Dispose() => Engine.Changed -= OnChanged;
+
+    private void Copy()
+    {
+        Shell.CopyText(Key.Hex);
+        _copied = true;
+    }
+}

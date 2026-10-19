@@ -1,0 +1,12 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/TradeGuard.Bridge/TradeGuard.Bridge.csproj" />
+    <Project Path="src/TradeGuard.Desktop/TradeGuard.Desktop.csproj" />
+    <Project Path="src/TradeGuard.Domain/TradeGuard.Domain.csproj" />
+    <Project Path="src/TradeGuard.Infrastructure/TradeGuard.Infrastructure.csproj" />
+    <Project Path="src/TradeGuard.UI/TradeGuard.UI.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/TradeGuard.Tests/TradeGuard.Tests.csproj" />
+  </Folder>
+</Solution>

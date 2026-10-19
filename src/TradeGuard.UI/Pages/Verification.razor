@@ -1,0 +1,233 @@
+@page "/verificacao"
+@implements IDisposable
+@using TradeGuard.Infrastructure
+@inject TradingEngine Engine
+@inject SettingsStore Store
+@inject JournalStore Journal
+@inject B3Clock Clock
+@inject ShadowLearningService ShadowLearning
+
+<PageTitle>Verificação · TradeGuard</PageTitle>
+
+<h1 class="tg-title">Verificação</h1>
+<div class="tg-subtitle">Tudo o que o robô faz, para que serve, onde muda e se está funcionando agora.</div>
+
+@{ var s = Engine.State; var groups = Items(s); var problems = groups.SelectMany(g => g.Items).Count(i => i.State == Check.Problem); }
+
+<div class="tg-status @(problems == 0 ? "success" : "danger")" data-test="resumo">
+    <span class="tg-dot @(problems == 0 ? "live" : "")"></span>
+    <div>
+        <div class="tg-status-head">@(problems == 0 ? "Tudo funcionando" : $"{problems} item(ns) com problema")</div>
+        <div class="tg-status-detail">Atualiza sozinho. ✓ funcionando · … aguardando o pregão/mercado · – desligado por você · ✕ problema</div>
+    </div>
+    <button class="btn btn-ghost btn-sm ms-auto px-3" title="Compra 1 contrato no SIMULADOR, o robô põe o stop e zera sozinho após 1 minuto. Prova ordem → stop → saída → diário sem esperar o horário das regras."
+            @onclick="TestExecution">Testar execução</button>
+    <button class="btn btn-primary btn-sm px-3" data-test="testar-avisos" @onclick="TestAlerts">Testar avisos</button>
+</div>
+@if (_testResult is not null) { <div class="tg-note ok mb-3" data-test="teste-avisos">@_testResult</div> }
+
+@foreach (var g in groups)
+{
+    <div class="tg-card mb-3">
+        <div class="tg-section">@g.Title</div>
+        @foreach (var i in g.Items)
+        {
+            <div class="tg-check" data-test="item" data-state="@i.State">
+                <span class="tg-check-icon @i.State.ToString().ToLowerInvariant()">@Icon(i.State)</span>
+                <div class="tg-check-body">
+                    <div><b>@i.Name</b> <span class="muted">· @i.What</span></div>
+                    <div class="small muted">@i.Now@(i.Where is null ? "" : $" · muda em {i.Where}")</div>
+                </div>
+            </div>
+        }
+    </div>
+}
+
+@code {
+    private enum Check { Ok, Waiting, Off, Problem }
+    private sealed record Item(string Name, string What, Check State, string Now, string? Where = null);
+    private sealed record Group(string Title, IReadOnlyList<Item> Items);
+
+    private string? _testResult;
+    private bool _backupOk;
+    private int _journalCount;
+    private PendingSettings? _pending;
+
+    protected override async Task OnInitializedAsync()
+    {
+        Engine.Changed += OnChanged;
+        _backupOk = File.Exists(Path.Combine(Journal.BackupDirectory, $"tradeguard-{Clock.TradingDay:yyyy-MM-dd}.db"));
+        _journalCount = (await Journal.AllTradesAsync()).Count;
+        _pending = await Store.PendingAsync(Clock.TradingDay);
+    }
+
+    private void OnChanged() => InvokeAsync(StateHasChanged);
+
+    public void Dispose() => Engine.Changed -= OnChanged;
+
+    private async Task TestAlerts() => _testResult = await Engine.TestAlertsAsync();
+
+    private void TestExecution()
+    {
+        Engine.RequestExecutionTest();
+        _testResult = "Teste de execução pedido: acompanhe no Painel (entra em até 1 s, zera sozinho após 1 minuto).";
+    }
+
+    private static string Icon(Check c) => c switch { Check.Ok => "✓", Check.Waiting => "…", Check.Off => "–", _ => "✕" };
+
+    private static Check On(bool enabled) => enabled ? Check.Ok : Check.Off;
+
+    private IReadOnlyList<Group> Items(EngineState s)
+    {
+        var r = s.Settings;
+        var now = Clock.Now;
+        var marketOpen = now.DayOfWeek is not (DayOfWeek.Saturday or DayOfWeek.Sunday) && TimeOnly.FromDateTime(now.DateTime) is var t
+                         && t >= new TimeOnly(9, 0) && t <= new TimeOnly(17, 55);
+        var quoteAge = s.Quote is { } q ? Clock.UtcNow - q.TimeUtc : TimeSpan.MaxValue;
+        var pts = (decimal v) => $"{v:0.#} pts";
+
+        return
+        [
+            new("Conexão", [
+                new("Ponte com o MT5", "o EA no gráfico conversa com o robô por um canal local cifrado",
+                    s.Connected ? Check.Ok : Check.Problem,
+                    s.Connected ? $"conectado · conta {s.Connection?.Account} · {s.Connection?.Symbol}" : "desconectado: o robô reabre/reinicia o MT5 sozinho em até 90 s"),
+                new("Chave da ponte", "impede outro programa de mandar ordens pelo canal",
+                    s.RejectedHandshakes == 0 || s.Connected ? Check.Ok : Check.Problem,
+                    s.RejectedHandshakes == 0 ? "sem recusas" : $"{s.RejectedHandshakes} conexão(ões) com chave antiga recusada(s); o MT5 é reiniciado com a chave certa"),
+                new("Conta", "simulador ou dinheiro de verdade",
+                    s.Connection is null ? Check.Waiting : s.Connection.IsDemo ? Check.Ok : s.Readiness.Qualified && r.AllowRealAccount ? Check.Ok : Check.Problem,
+                    s.Connection is null ? "aguardando o MT5" : s.Connection.IsDemo ? "simulador (demo)" : s.Readiness.Qualified && r.AllowRealAccount ? "piloto real liberado (máx. 1 contrato e 0,5% do patrimônio)" : "conta real: bloqueada pelas evidências operacionais"),
+                new("Corretora", "MT5 logado e recebendo da Clear",
+                    !s.Connected ? Check.Waiting : s.BrokerConnected ? Check.Ok : Check.Problem,
+                    s.BrokerConnected ? "conectado" : "MT5 sem conexão com a corretora: entradas bloqueadas"),
+                new("Algotrading", "botão do MT5 que permite o robô enviar ordens",
+                    !s.Connected ? Check.Waiting : s.AlgoAllowed ? Check.Ok : Check.Problem,
+                    s.AlgoAllowed ? "ligado" : "DESLIGADO: ligue o botão Algotrading no MT5"),
+                new("Cotação", "preço ao vivo do mini dólar",
+                    quoteAge < TimeSpan.FromSeconds(30) ? Check.Ok : marketOpen && s.Connected ? Check.Problem : Check.Waiting,
+                    s.Quote is { } q2 ? $"{q2.Last:0.0} às {B3Clock.ToB3(q2.TimeUtc):HH:mm:ss}" : "sem cotação"),
+                new("Gráfico (candles de 5 min)", "base das médias, da leitura e dos setups",
+                    s.LastCandleUtc is null ? (s.Connected ? Check.Problem : Check.Waiting) : Check.Ok,
+                    s.LastCandleUtc is { } lc ? $"último candle {B3Clock.ToB3(lc):dd/MM HH:mm}" : "nenhum candle recebido"),
+                new("Contrato vigente (rollover)", "o EA troca sozinho para o próximo vencimento",
+                    s.ContractWarning is null ? Check.Ok : Check.Waiting,
+                    s.ContractWarning ?? $"{s.Connection?.Symbol ?? "—"} em uso")
+            ]),
+            new("Proteção (sempre valendo)", [
+                new("Stop loss", "saída automática no prejuízo, colocada em toda posição, até em ordem manual", Check.Ok,
+                    $"{pts(r.StopPoints)} (máx. {pts(r.MaxStopPoints)}; stop mais largo é apertado)", "Regras → Essencial"),
+                new("Alvo / take profit", "saída automática no lucro", Check.Ok, pts(r.TargetPoints), "Regras → Essencial"),
+                new("Stop diário", "perdeu isso no dia: zera e trava até amanhã", Check.Ok,
+                    $"R$ {-Math.Min(0, s.DayRealized):0} de R$ {r.MaxDailyLoss:0} usados", "Regras → Essencial"),
+                new("Trades por dia", "evita operar demais", r.MaxTradesPerDay > 0 ? Check.Ok : Check.Off,
+                    $"{s.DayTrades} de {r.MaxTradesPerDay} hoje", "Regras → Essencial"),
+                new("Loss seguidos", "perdeu N seguidas, o dia acaba", On(r.MaxConsecutiveLosses > 0),
+                    $"{s.ConsecutiveLosses} de {r.MaxConsecutiveLosses}", "Regras → Essencial"),
+                new("Trava do dia", "quando alguma trava dispara, nada de entrada nova até o próximo pregão",
+                    s.Lock == LockReason.None ? Check.Ok : Check.Waiting,
+                    s.Lock == LockReason.None ? "livre" : $"travado: {s.Lock.Describe()}"),
+                new("Horário", "só entra dentro da janela e zera tudo no fim", Check.Ok,
+                    $"começa {r.WindowStart:HH\\:mm} · última entrada {r.WindowEnd:HH\\:mm} · zera {r.FlattenAt:HH\\:mm}", "Regras → Essencial"),
+                new("Zeragem de emergência no MT5", "o próprio EA zera mesmo com o TradeGuard fechado", Check.Ok,
+                    $"às {r.EmergencyFlatten:HH\\:mm}"),
+                new("Stop semanal / mensal", "limite de perda da semana e do mês", On(r.MaxWeeklyLoss > 0 || r.MaxMonthlyLoss > 0),
+                    $"semana R$ {s.WeekPnl:0} (limite {r.MaxWeeklyLoss:0}) · mês R$ {s.MonthPnl:0} (limite {r.MaxMonthlyLoss:0})", "Regras → Avançado → Travas"),
+                new("Pausa após loss", "bloqueia entrada logo depois de perder (trade de vingança)", On(r.CooldownAfterLossMinutes > 0),
+                    $"{r.CooldownAfterLossMinutes} min", "Regras → Avançado → Travas"),
+                new("Filtro de notícias", "não entra perto de notícia forte (payroll, juros)", On(r.NewsFilterEnabled),
+                    r.NewsFilterEnabled ? $"{s.UpcomingNews.Count} notícia(s) no radar · bloqueia {r.NewsBlockMinutesBefore} min antes e {r.NewsBlockMinutesAfter} depois" : "desligado", "Regras → Essencial"),
+                new("Spread máximo", "não entra com mercado vazio (compra/venda muito separadas)", On(r.MaxSpreadPoints > 0), pts(r.MaxSpreadPoints), "Regras → Avançado → Travas"),
+                new("Preço médio proibido", "aumentar posição perdedora é zerado na hora", r.AllowScaleIn ? Check.Off : Check.Ok,
+                    r.AllowScaleIn ? "permitido (arriscado)" : "proibido", "Regras → Avançado")
+            ]),
+            new("Gestão do trade (automática com a posição aberta)", [
+                new("Break-even", "leva o stop para a entrada quando anda a favor", On(r.BreakevenEnabled),
+                    r.BreakevenEnabled ? $"após {pts(r.BreakevenTriggerPoints)}" : "desligado", "Regras → Avançado → Gestão"),
+                new("Parcial", "realiza parte dos contratos no lucro (precisa de 2+ contratos)",
+                    r.Partials.Count == 0 ? Check.Off : r.Contracts > 1 || r.MaxContracts > 1 ? Check.Ok : Check.Off,
+                    r.Partials.Count == 0 ? "desligada" : r.Contracts > 1 || r.MaxContracts > 1 ? string.Join(", ", r.Partials.Select(p => $"{p.Contracts} em {p.TriggerPoints} pts")) : "configurada, mas com 1 contrato não acontece",
+                    "Regras → Avançado → Gestão"),
+                new("Stop em degraus", "garante lucro conforme o preço anda", On(r.ProfitLocks.Count > 0),
+                    r.ProfitLocks.Count == 0 ? "desligado" : string.Join(", ", r.ProfitLocks.Select(l => $"andou {l.TriggerPoints} → garante {l.LockPoints}")), "Regras → Avançado → Gestão"),
+                new("Trailing stop", "stop que segue o preço", On(r.TrailingEnabled),
+                    r.TrailingEnabled ? $"começa em {pts(r.TrailingStartPoints)}" : "desligado", "Regras → Avançado → Gestão"),
+                new("Saída por tempo", "encerra trade que não anda", On(r.MaxHoldMinutes > 0),
+                    r.MaxHoldMinutes > 0 ? $"{r.MaxHoldMinutes} min" : "desligada", "Regras → Avançado"),
+                new("Proteção do lucro do dia", "para se devolver boa parte do lucro", On(r.GiveBackPercent > 0),
+                    r.GiveBackPercent > 0 ? $"{r.GiveBackPercent:0}% depois de R$ {r.GiveBackActivationMoney:0}" : "desligada", "Regras → Avançado → Travas"),
+                new("Meta diária", "bateu a meta, encerra no lucro", On(r.DailyProfitTarget > 0),
+                    r.DailyProfitTarget > 0 ? $"R$ {r.DailyProfitTarget:0}" : "desligada", "Regras → Avançado → Travas")
+            ]),
+            new("Fluxo · tape reading", [
+                new("Times & Trades com agressor", "cada negócio com quem agrediu (comprador ou vendedor)",
+                    s.FlowCaps is null ? Check.Waiting : s.FlowCaps.AggressorOk ? Check.Ok : Check.Problem,
+                    s.FlowCaps is { } fc ? $"{fc.WithAggressor} de {fc.Trades30m} negócios com lado agressor (últimos 30 min)" : "aguardando o EA"),
+                new("Book", "ordens esperando nos melhores preços", s.FlowCaps is null ? Check.Waiting : s.FlowCaps.BookDepth > 0 ? Check.Ok : Check.Problem,
+                    s.FlowCaps is { BookDepth: > 0 } b ? $"{b.BookDepth} níveis" : "sem book"),
+                new("Negócios chegando ao vivo", "base do saldo de agressão",
+                    s.LastPrintUtc is { } lp && Clock.UtcNow - lp < TimeSpan.FromMinutes(2) ? Check.Ok : marketOpen && s.Connected ? Check.Problem : Check.Waiting,
+                    s.LastPrintUtc is { } lp2 ? $"último negócio {B3Clock.ToB3(lp2):HH:mm:ss}" : "nenhum ainda"),
+                new("Filtro de fluxo", "rompimento só vira sinal com saldo de agressão a favor nos últimos 5 s e sem absorção contra",
+                    On(r.FlowFilterEnabled), r.FlowFilterEnabled ? "ligado" : "desligado", "Regras → Modo"),
+                new("Histórico de ticks", "negócios de pregões passados para testar as estratégias de fluxo",
+                    s.FlowCaps is null ? Check.Waiting : s.FlowCaps.TickHistory ? Check.Ok : Check.Problem,
+                    s.FlowCaps is { TickHistory: true } ? "disponível no servidor da Clear" : "não disponível")
+            ]),
+            new("Sinais e alertas", [
+                new("Modo", "quem decide a entrada", Check.Ok, r.Mode switch
+                {
+                    TradingMode.SemiAuto => "Semiautomático: avisa e você confirma",
+                    TradingMode.Auto => "Automático (carteira versionada, só no simulador)",
+                    _ => "Assistente: sem avisos de entrada (ligue o Semiautomático para receber sinais)"
+                }, "Regras → Modo"),
+                new("Setups observados", "estratégias que geram os sinais",
+                    r.Mode == TradingMode.Assistant ? Check.Off : r.EnabledSetups.Count > 0 ? Check.Ok : Check.Off,
+                    r.EnabledSetups.Count == 0 ? "nenhum" : string.Join(", ", r.EnabledSetups), "Regras → Modo"),
+                new("Setups armados agora", "esperando o preço romper o gatilho",
+                    s.ArmedSetups.Count > 0 ? Check.Ok : Check.Waiting,
+                    s.ArmedSetups.Count == 0 ? "nenhum no momento (aparece aqui e no Painel quando armar)"
+                        : string.Join(" · ", s.ArmedSetups.Select(a => $"{a.Setup} {(a.Side == Side.Buy ? "compra acima de" : "venda abaixo de")} {a.Trigger:0.0}"))),
+                new("Som do sinal", "toca ao aparecer um sinal (compra e venda com sons diferentes)", On(r.SignalSound),
+                    r.SignalSound ? "ligado · use \"Testar avisos\" acima" : "desligado", "Regras → Modo"),
+                .. (s.Studies.Count == 0
+                    ? [new Item("Teste das estratégias", "o robô refaz todo dia o teste nos ~2 anos de candles reais", Check.Waiting, "aguardando os candles do MT5")]
+                    : s.Studies.Select(ms => new Item($"Teste · {ms.Setup}", SetupNames.Explain(ms.Setup),
+                        ms.Validated ? Check.Ok : Check.Problem,
+                        $"{ms.Sessions} pregões · calibragem {ms.Calibration.NetR:+0.0;-0.0}R · validação {ms.Validation.NetR:+0.0;-0.0}R (PF {ms.Validation.ProfitFactor}, acerto {ms.Validation.WinRate}%) · pior queda {ms.MaxDrawdownR:0.0}R · {(ms.Validated ? "monitoramento histórico saudável" : "ALERTA DE DERIVA: revisar; a carteira não muda sozinha")}"))),
+                new("Carteira automática", "regras versionadas; o reteste monitora deriva, mas não troca a carteira sozinho",
+                    s.ValidatedSetups.Count > 0 ? Check.Ok : Check.Waiting,
+                    s.ValidatedSetups.Count > 0 ? string.Join(", ", s.ValidatedSetups) : "aguardando os históricos WDO e WIN"),
+                new("Paridade replay × ao vivo", "recalcula lado, ADR, movimento, limite e execução com os candles disponíveis no horário",
+                    s.Readiness.Parity.Issues > 0 ? Check.Problem : s.Readiness.Parity.Reports > 0 ? Check.Ok : Check.Waiting,
+                    s.Readiness.Parity.Message),
+                new("Portão para conta real", "exige evidência acumulada; nunca é liberado apenas por configuração",
+                    s.Readiness.Qualified ? Check.Ok : Check.Waiting, s.Readiness.Message)
+            ]),
+            new("Aprendizado probabilístico automático", [
+                new(ShadowLearning.Status.Headline,
+                    "treina, testa e leva filtros aprovados ao simulador automaticamente",
+                    ShadowLearning.Status.State is "model_rejected" or "cycle_blocked" ? Check.Problem
+                        : ShadowLearning.Status.State is "review_ready" or "demo_canary" or "demo_champion" ? Check.Ok : Check.Waiting,
+                    ShadowLearning.Status.Detail,
+                    "não exige ajuste; reprova, substitui, ativa e recua sozinho"),
+                new("Autoridade sobre ordens", "benefício controlado sem ampliar o risco", Check.Ok,
+                    ShadowLearning.Status.State is "demo_canary" or "demo_champion"
+                        ? "piloto ativo: pode apenas vetar sinais no simulador; não cria entradas nem altera risco, stop ou saída"
+                        : "sem autoridade enquanto não passar pelos portões; as 11 regras continuam decidindo")
+            ]),
+            new("Registro e segurança dos dados", [
+                new("Espaço e escrita", "bloqueia entradas se a trilha de auditoria não puder ser gravada",
+                    s.Readiness.StorageHealthy ? Check.Ok : Check.Problem, s.Readiness.StorageMessage),
+                new("Regras salvas", "o que você salvou em Regras",
+                    Check.Ok, _pending is null ? "tudo valendo hoje" : $"há mudança agendada para {_pending.EffectiveFrom:dd/MM} (aparece em Regras)", "Regras"),
+                new("Diário", "todo trade gravado, inclusive os feitos com o robô fechado (lidos do MT5)",
+                    Check.Ok, $"{_journalCount} trade(s) no diário", "Diário"),
+                new("Backup diário", "cópia do banco dentro da pasta única K:\\TradeGuard\\dados\\backups",
+                    _backupOk ? Check.Ok : Check.Problem, _backupOk ? "backup de hoje feito" : "backup de hoje não encontrado"),
+                new("Checklist do dia", "3 perguntas antes de operar", s.ChecklistDone ? Check.Ok : Check.Waiting,
+                    s.ChecklistDone ? "confirmado hoje" : "pendente (aparece no Painel)")
+            ])
+        ];
+    }
+}

@@ -1,0 +1,76 @@
+@* "O que o robô está esperando": frase principal + etapas com ícone de forma (✓ … ✕ –), não só cor. *@
+<div class="tg-reading">
+    <div class="tg-label mb-2">O que o robô está esperando</div>
+    <div class="tg-reading-main @ToneCss">
+        <span class="tg-reading-arrow" aria-hidden="true">@Arrow</span>
+        <div>
+            <div class="tg-reading-headline">@Reading.Headline</div>
+            @if (Reading.Subline is not null) { <div class="tg-reading-sub">@Reading.Subline</div> }
+        </div>
+        @if (Reading.Steps.Count > 0)
+        {
+            <span class="tg-trend @TrendCss ms-auto" title="Tendência pela linha branca do gráfico (média lenta).">
+                TENDÊNCIA: @TrendText
+            </span>
+        }
+    </div>
+
+    @if (Reading.Steps.Count > 0)
+    {
+        <ol class="tg-flow">
+            @foreach (var step in Reading.Steps)
+            {
+                <li class="@StateCss(step.State)">
+                    <span class="tg-flow-ico" aria-hidden="true">@Icon(step.State)</span>
+                    <div>
+                        <div class="tg-flow-title">@step.Title</div>
+                        <div class="tg-flow-detail">@step.Detail</div>
+                    </div>
+                </li>
+            }
+        </ol>
+    }
+</div>
+
+@code {
+    [Parameter, EditorRequired] public MarketReading Reading { get; set; } = MarketReading.Empty;
+
+    private string TrendText => Reading.Trend switch
+    {
+        Trend.Up => "ALTA ▲",
+        Trend.Down => "BAIXA ▼",
+        _ => "LATERAL ↔"
+    };
+
+    private string TrendCss => Reading.Trend switch { Trend.Up => "up", Trend.Down => "down", _ => "" };
+
+    private string ToneCss => Reading.Tone switch
+    {
+        ReadingTone.Buy => "buy",
+        ReadingTone.Sell => "sell",
+        ReadingTone.Blocked => "blocked",
+        _ => ""
+    };
+
+    private string Arrow => Reading.Tone switch
+    {
+        ReadingTone.Blocked => "✕",
+        _ => Reading.Trend switch { Trend.Up => "▲", Trend.Down => "▼", _ => "↔" }
+    };
+
+    private static string StateCss(StepState s) => s switch
+    {
+        StepState.Ok => "ok",
+        StepState.Waiting => "wait",
+        StepState.Blocked => "block",
+        _ => "idle"
+    };
+
+    private static string Icon(StepState s) => s switch
+    {
+        StepState.Ok => "✓",
+        StepState.Waiting => "…",
+        StepState.Blocked => "✕",
+        _ => "–"
+    };
+}

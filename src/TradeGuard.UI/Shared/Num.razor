@@ -1,0 +1,12 @@
+<div class="mb-2">
+    <label class="form-label small mb-0" title="@Hint">@Label@(Hint is null ? "" : " ⓘ")</label>
+    <input type="number" class="form-control form-control-sm" value="@Value"
+           @onchange="e => ValueChanged.InvokeAsync(int.TryParse(e.Value?.ToString(), out var v) ? v : Value)" />
+</div>
+
+@code {
+    [Parameter] public string Label { get; set; } = "";
+    [Parameter] public string? Hint { get; set; }
+    [Parameter] public int Value { get; set; }
+    [Parameter] public EventCallback<int> ValueChanged { get; set; }
+}

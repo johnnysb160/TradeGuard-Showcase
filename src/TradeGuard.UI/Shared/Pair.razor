@@ -1,0 +1,24 @@
+@using System.Globalization
+
+<div class="input-group input-group-sm mb-1">
+    <span class="input-group-text">@LeftLabel</span>
+    <input type="text" inputmode="decimal" class="form-control" value="@Left.ToString(CultureInfo.InvariantCulture)"
+           @onchange="e => Parse(e, LeftChanged)" />
+    <span class="input-group-text">@RightLabel</span>
+    <input type="text" inputmode="decimal" class="form-control" value="@Right.ToString(CultureInfo.InvariantCulture)"
+           @onchange="e => Parse(e, RightChanged)" />
+</div>
+
+@code {
+    [Parameter] public string LeftLabel { get; set; } = "";
+    [Parameter] public string RightLabel { get; set; } = "";
+    [Parameter] public decimal Left { get; set; }
+    [Parameter] public EventCallback<decimal> LeftChanged { get; set; }
+    [Parameter] public decimal Right { get; set; }
+    [Parameter] public EventCallback<decimal> RightChanged { get; set; }
+
+    private static Task Parse(ChangeEventArgs e, EventCallback<decimal> cb) =>
+        decimal.TryParse(e.Value?.ToString()?.Replace(',', '.'), NumberStyles.Number, CultureInfo.InvariantCulture, out var v)
+            ? cb.InvokeAsync(v)
+            : Task.CompletedTask;
+}

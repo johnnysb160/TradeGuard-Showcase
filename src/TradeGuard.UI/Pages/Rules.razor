@@ -1,0 +1,248 @@
+@page "/regras"
+@using TradeGuard.Infrastructure
+@inject TradingEngine Engine
+@inject SettingsStore Store
+@inject B3Clock Clock
+
+<PageTitle>Regras · TradeGuard</PageTitle>
+
+<h1 class="tg-title">Regras</h1>
+<div class="tg-subtitle">Apertar vale na hora. Afrouxar só vale no próximo pregão.</div>
+
+@if (_scheduled.Count > 0 && _pending is not null)
+{
+    <div class="tg-note warn mb-3" data-test="agendado">
+        <b>Salvo e agendado para @_pending.EffectiveFrom.ToString("dd/MM"):</b> @string.Join(", ", _scheduled).
+        Os campos abaixo já mostram esses valores; até lá vale o que está em vigor hoje (afrouxar só no próximo pregão).
+    </div>
+}
+
+<div class="d-flex gap-2 flex-wrap mb-3">
+    <span class="tg-label align-self-center me-1">Modelos</span>
+    <button class="btn btn-chip" @onclick="() => Load(RiskSettings.Beginner)">Iniciante</button>
+    <button class="btn btn-chip" @onclick="() => Load(RiskSettings.Conservative)">Conservador (manhã)</button>
+    <button class="btn btn-chip" @onclick="() => Load(RiskSettings.TwoContracts)">2 contratos com parcial</button>
+</div>
+
+@if (_m is not null)
+{
+    <EditForm Model="_m" OnSubmit="Save">
+        <div class="tg-card mb-3">
+            <div class="tg-section">Modo de operação</div>
+            <div class="tg-seg" role="radiogroup" aria-label="Modo de operação">
+                @foreach (var (mode, title, text) in Modes)
+                {
+                    var locked = mode == TradingMode.Auto && Engine.State.ValidatedSetups.Count == 0;
+                    <button type="button" role="radio" aria-checked="@(_m.Mode == mode ? "true" : "false")" disabled="@locked"
+                            class="@(_m.Mode == mode ? "on" : "")" @onclick="() => _m.Mode = mode">
+                        <span class="tg-seg-title">@title @(locked ? "🔒" : "")</span>
+                        <span class="tg-seg-text">@text</span>
+                    </button>
+                }
+            </div>
+            <div class="small muted mt-2">
+                @if (Engine.State.ValidatedSetups.Count == 0)
+                {
+                    <span>Automático aguardando os históricos WDO e WIN. A carteira não muda sozinha com o resultado do dia.</span>
+                }
+                else
+                {
+                    <span>Carteira automática versionada: <b>@string.Join(", ", Engine.State.ValidatedSetups)</b> (só no simulador). O reteste diário apenas monitora deriva.</span>
+                }
+            </div>
+
+            <div class="tg-section mt-3" title="Estratégias conhecidas que o robô observa para sugerir entradas.">Setups observados ⓘ</div>
+            @foreach (var setup in SetupNames.Operational)
+            {
+                var id = "setup-" + setup.GetHashCode();
+                <div class="form-check mb-1" title="@SetupNames.Explain(setup)">
+                    <input class="form-check-input" type="checkbox" id="@id" checked="@_m.EnabledSetups.Contains(setup)"
+                           @onchange="e => ToggleSetup(setup, e.Value is true)" />
+                    <label class="form-check-label" for="@id"><b style="color:var(--tg-text)">@setup</b> · @SetupNames.Explain(setup)</label>
+                </div>
+            }
+            <Chk Label="Filtro de fluxo (tape reading) · rompimento só vale com agressão a favor" Hint="Só avisa o rompimento se, nos últimos 5 segundos, quem agrediu no Times & Trades foi a favor (saldo de agressão) e não há absorção contra. Desligar vale no próximo pregão." @bind-Value="_m.FlowFilterEnabled" />
+            <Chk Label="Som quando aparecer um sinal" @bind-Value="_m.SignalSound" />
+
+            <div class="tg-section mt-3">Sons</div>
+            <label class="small" for="sound-volume">Volume · <b>@_m.SoundVolumePercent%</b> <span class="muted">(todos os sons do TradeGuard, inclusive conexão)</span></label>
+            <input id="sound-volume" type="range" class="form-range" min="0" max="100" step="5" @bind="_m.SoundVolumePercent" @bind:event="oninput"
+                   @onchange="() => AlertSounds.Preview(AlertSounds.Connection, _m.SoundVolumePercent)" />
+            <div class="row g-2 mt-1">
+                <div class="col-6">
+                    <label class="small">Entrou na operação</label>
+                    <div class="d-flex gap-1">
+                        <select class="form-select form-select-sm" @bind="_m.EntrySound">
+                            @foreach (var s in AlertSounds.Catalog) { <option value="@s.File">@s.Label</option> }
+                        </select>
+                        <button type="button" class="btn btn-sm btn-outline-secondary" title="Ouvir" @onclick="() => AlertSounds.Preview(_m.EntrySound, _m.SoundVolumePercent)">▶</button>
+                    </div>
+                </div>
+                <div class="col-6">
+                    <label class="small">Saiu da operação</label>
+                    <div class="d-flex gap-1">
+                        <select class="form-select form-select-sm" @bind="_m.ExitSound">
+                            @foreach (var s in AlertSounds.Catalog) { <option value="@s.File">@s.Label</option> }
+                        </select>
+                        <button type="button" class="btn btn-sm btn-outline-secondary" title="Ouvir" @onclick="() => AlertSounds.Preview(_m.ExitSound, _m.SoundVolumePercent)">▶</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="tg-card">
+        <div class="tg-section">Essencial</div>
+        <div class="row g-3">
+            <div class="col-12 col-md-4">
+                <Num Label="Contratos · quantos por entrada" Hint="No mini dólar, 1 ponto vale R$ 10 por contrato." @bind-Value="_m.Contracts" />
+                <Dec Label="Stop loss · onde desisto (pontos)" Hint="Distância da entrada até a saída no prejuízo. É a sua perda máxima no trade." @bind-Value="_m.StopPoints" />
+                <Dec Label="Alvo / take profit · onde realizo (pontos)" Hint="Distância da entrada até a saída no lucro." @bind-Value="_m.TargetPoints" />
+            </div>
+            <div class="col-12 col-md-4">
+                <Dec Label="Stop diário · perda máxima do dia (R$)" Hint="Chegou nesse prejuízo no dia, o robô zera tudo e trava até amanhã." @bind-Value="_m.MaxDailyLoss" />
+                <Num Label="Trades por dia · máximo de operações" Hint="Operar demais é o erro mais comum de quem começa." @bind-Value="_m.MaxTradesPerDay" />
+                <Num Label="Loss seguidos · perdas em sequência até parar" Hint="Loss = trade com prejuízo. Perdeu N seguidas, o dia acaba." @bind-Value="_m.MaxConsecutiveLosses" />
+            </div>
+            <div class="col-12 col-md-4">
+                <Txt Label="Horário · começar às" Hint="Horário de Brasília, formato HH:mm." @bind-Value="_m.WindowStart" />
+                <Txt Label="Horário · última entrada às" Hint="Depois disso não abre trade novo. Mudar para mais tarde só vale no próximo pregão." @bind-Value="_m.WindowEnd" />
+                <Txt Label="Horário · zerar tudo às (até 17:50)" Hint="O robô fecha qualquer posição neste horário. O pregão do mini dólar termina 17:55; a zeragem compulsória da corretora custa R$ 20 por contrato." @bind-Value="_m.FlattenAt" />
+                <Chk Label="Filtro de notícias · pular horário de notícia forte" Hint="Payroll, juros (FOMC/Copom) e afins fazem o dólar disparar para qualquer lado." @bind-Value="_m.NewsFilterEnabled" />
+            </div>
+        </div>
+        </div>
+
+        <details class="tg-details">
+            <summary>Avançado</summary>
+            <div class="row g-3 mt-1">
+                <fieldset class="col-12 col-lg-4"><div class="tg-card h-100 tg-fieldset">
+                    <legend>Tamanho da posição</legend>
+                    <Dec Label="Risco por trade · R$ que aceito perder (0 = contratos fixos)" Hint="O robô calcula quantos contratos cabem: R$ ÷ (stop × R$ 10)." @bind-Value="_m.RiskPerTradeMoney" />
+                    <Num Label="Máximo de contratos · teto absoluto" @bind-Value="_m.MaxContracts" />
+                    <Dec Label="Stop máximo · stop mais largo aceito (pontos)" Hint="Se você puser um stop maior à mão no MT5, o robô aperta." @bind-Value="_m.MaxStopPoints" />
+                    <Chk Label="Aumento manual no MT5 · deixar você aumentar posição perdedora" Hint="Se você aumentar a posição à mão contra você, o robô zera o excesso. É o caminho clássico para quebrar. Deixe desligado." @bind-Value="_m.AllowScaleIn" />
+                    <div class="small mt-2 mb-1 muted" title="O robô aumenta a posição sozinho. Nos dois modos a perda máxima da posição inteira fica IGUAL à da entrada inicial: ao aumentar, o stop aperta. Ligar vale no próximo pregão.">Aumento de posição pelo robô ⓘ</div>
+                    <select class="form-select form-select-sm mb-2" data-test="scale-mode" value="@_m.ScaleMode" @onchange="e => _m.ScaleMode = Enum.Parse<ScaleMode>(e.Value?.ToString() ?? nameof(ScaleMode.Off))">
+                        <option value="@ScaleMode.Off">Desligado</option>
+                        <option value="@ScaleMode.WithTrend">A favor (piramidação) · aumenta no lucro com agressão a favor</option>
+                        <option value="@ScaleMode.Average">Preço médio · aumenta contra só com absorção a favor</option>
+                    </select>
+                    @if (_m.ScaleMode != ScaleMode.Off)
+                    {
+                        <Num Label="…contratos por aumento" @bind-Value="_m.ScaleAddContracts" />
+                        <Num Label="…máximo de aumentos (1 ou 2)" @bind-Value="_m.ScaleMaxAdds" />
+                        <Dec Label="…a cada (pontos)" Hint="Distância entre os aumentos: a favor (lucro) ou contra (preço médio)." @bind-Value="_m.ScaleStepPoints" />
+                    }
+                    <Num Label="Saída por tempo · zerar após N minutos (0 = não)" Hint="Trade que não anda em N minutos é encerrado." @bind-Value="_m.MaxHoldMinutes" />
+                </div></fieldset>
+
+                <fieldset class="col-12 col-lg-4"><div class="tg-card h-100 tg-fieldset">
+                    <legend>Gestão do trade</legend>
+                    <Chk Label="Break-even · zerar o risco" Hint="Leva o stop para o preço de entrada: se voltar, sai no zero a zero." @bind-Value="_m.BreakevenEnabled" />
+                    <Dec Label="…quando andar a favor (pontos)" @bind-Value="_m.BreakevenTriggerPoints" />
+                    <Dec Label="…com folga de (pontos)" Hint="0 = exatamente na entrada. 0,5 = garante meio ponto." @bind-Value="_m.BreakevenOffsetPoints" />
+                    <div class="small mt-2 mb-1 muted" title="Quando o preço andar X pontos a favor, o stop sobe para garantir Y pontos de lucro.">Stop em degraus · garantir lucro ⓘ</div>
+                    <Pair LeftLabel="andou" RightLabel="garante" @bind-Left="_m.Lock1Trigger" @bind-Right="_m.Lock1Points" />
+                    <Pair LeftLabel="andou" RightLabel="garante" @bind-Left="_m.Lock2Trigger" @bind-Right="_m.Lock2Points" />
+                    <div class="small mt-2 mb-1 muted" title="Fecha parte dos contratos no lucro e deixa o resto correr. Precisa de 2 ou mais contratos.">Parcial · realizar parte ⓘ</div>
+                    <Pair LeftLabel="em (pts)" RightLabel="contratos" @bind-Left="_m.Partial1Trigger" @bind-Right="P1" />
+                    <Pair LeftLabel="em (pts)" RightLabel="contratos" @bind-Left="_m.Partial2Trigger" @bind-Right="P2" />
+                    <Pair LeftLabel="em (pts)" RightLabel="contratos" @bind-Left="_m.Partial3Trigger" @bind-Right="P3" />
+                    <Pair LeftLabel="em (pts)" RightLabel="contratos" @bind-Left="_m.Partial4Trigger" @bind-Right="P4" />
+                    <Chk Label="Trailing stop · stop que segue o preço" Hint="O stop vai subindo atrás do preço (na compra) para não devolver o lucro." @bind-Value="_m.TrailingEnabled" />
+                    <Chk Label="…pelo candle anterior" Hint="Candle = barra do gráfico. Aqui usa a mínima/máxima do minuto anterior." @bind-Value="_m.TrailingByCandle" />
+                    <Dec Label="…começa quando andar (pontos)" @bind-Value="_m.TrailingStartPoints" />
+                    <Dec Label="…distância do preço (pontos)" @bind-Value="_m.TrailingDistancePoints" />
+                </div></fieldset>
+
+                <fieldset class="col-12 col-lg-4"><div class="tg-card h-100 tg-fieldset">
+                    <legend>Travas</legend>
+                    <Dec Label="Meta diária · parar ao ganhar (R$, 0 = não)" Hint="Bateu a meta, encerra o dia no lucro." @bind-Value="_m.DailyProfitTarget" />
+                    <Dec Label="Devolução · máx. % do lucro do dia que aceito devolver" Hint="Ex.: chegou a +R$ 200 e caiu para +R$ 100 com 50% → encerra o dia." @bind-Value="_m.GiveBackPercent" />
+                    <Dec Label="…vale depois de lucrar (R$)" @bind-Value="_m.GiveBackActivationMoney" />
+                    <Dec Label="Stop semanal · perda máxima da semana (R$)" @bind-Value="_m.MaxWeeklyLoss" />
+                    <Dec Label="Stop mensal · perda máxima do mês (R$)" @bind-Value="_m.MaxMonthlyLoss" />
+                    <Num Label="Pausa após loss (minutos)" Hint="Evita o trade de vingança logo depois de perder." @bind-Value="_m.CooldownAfterLossMinutes" />
+                    <Dec Label="Spread máximo · diferença compra/venda (pontos)" Hint="Spread largo = mercado sem gente, entrada cara." @bind-Value="_m.MaxSpreadPoints" />
+                    <Num Label="Notícia: bloquear minutos antes" @bind-Value="_m.NewsBlockMinutesBefore" />
+                    <Num Label="Notícia: bloquear minutos depois" @bind-Value="_m.NewsBlockMinutesAfter" />
+                    <Chk Label="Conta real · permitir dinheiro de verdade" Disabled="@(!Engine.State.Readiness.Qualified)"
+                         Hint="Só é habilitado depois de 60 pregões/100 operações completas com paridade, 5 simulações de falha e 2 rollovers verificados."
+                         @bind-Value="_m.AllowRealAccount" />
+                    @if (!Engine.State.Readiness.Qualified)
+                    {
+                        <div class="small muted">🔒 @Engine.State.Readiness.Message</div>
+                    }
+                </div></fieldset>
+            </div>
+        </details>
+        <button type="submit" class="btn btn-primary mt-3 px-4">Salvar regras</button>
+    </EditForm>
+
+    @if (_result is not null)
+    {
+        <div class="tg-note @(_result.Errors.Count > 0 ? "bad" : _result.AppliedNow ? "ok" : "warn") mt-3" data-test="resultado">
+            @if (_result.Errors.Count > 0) { @string.Join(" ", _result.Errors) }
+            else if (_result.AppliedNow) { <span>Salvo e já valendo.</span> }
+            else { <span>Salvo. O que aperta já vale; @string.Join(", ", _result.Loosened) (afrouxa) vale a partir de @_result.EffectiveFrom.ToString("dd/MM").</span> }
+        </div>
+    }
+}
+
+@code {
+    private static readonly (TradingMode Mode, string Title, string Text)[] Modes =
+    [
+        (TradingMode.Assistant, "Assistente", "Você clica, o robô gere e trava."),
+        (TradingMode.SemiAuto, "Semiautomático", "O robô sugere, você confirma."),
+        (TradingMode.Auto, "Automático", "O robô entra sozinho, nas mesmas travas.")
+    ];
+
+    private SettingsForm? _m;
+    private SettingsSaveResult? _result;
+
+    // Pair trabalha com decimal; contratos da parcial são inteiros.
+    private decimal P1 { get => _m!.Partial1Contracts; set => _m!.Partial1Contracts = (int)value; }
+    private decimal P2 { get => _m!.Partial2Contracts; set => _m!.Partial2Contracts = (int)value; }
+    private decimal P3 { get => _m!.Partial3Contracts; set => _m!.Partial3Contracts = (int)value; }
+    private decimal P4 { get => _m!.Partial4Contracts; set => _m!.Partial4Contracts = (int)value; }
+
+    private PendingSettings? _pending;
+    private IReadOnlyList<string> _scheduled = [];
+
+    // A tela mostra o que você deixou salvo (inclusive o agendado), nunca "volta" para o valor antigo.
+    protected override Task OnInitializedAsync() => LoadAsync();
+
+    private async Task LoadAsync()
+    {
+        var today = await Store.EffectiveAsync(Clock.TradingDay);
+        _pending = await Store.PendingAsync(Clock.TradingDay);
+        _scheduled = _pending is null ? [] : today.LoosenedBy(_pending.Settings);
+        _m = SettingsForm.From(_pending?.Settings ?? today);
+    }
+
+    private void ToggleSetup(string setup, bool on)
+    {
+        _m!.EnabledSetups.Remove(setup);
+        if (on) _m.EnabledSetups.Add(setup);
+    }
+
+    private void Load(RiskSettings preset)
+    {
+        _m = SettingsForm.From(preset);
+        _result = null;
+    }
+
+    private async Task Save()
+    {
+        if (_m is null) return;
+        if (!_m.TryBuild(out var settings, out var error))
+        {
+            _result = new SettingsSaveResult(false, Clock.TradingDay, [], [error]);
+            return;
+        }
+        if (!Engine.State.Readiness.Qualified) settings = settings with { AllowRealAccount = false };
+        _result = await Store.SaveAsync(settings, Clock.TradingDay);
+        Engine.Poke();
+        if (_result.Errors.Count == 0) await LoadAsync();
+    }
+}

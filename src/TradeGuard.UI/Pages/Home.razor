@@ -1,0 +1,493 @@
+@page "/"
+@implements IDisposable
+@inject TradingEngine Engine
+@inject SecondaryEngines Others
+@inject ShadowLearningService ShadowLearning
+@inject TradeGuard.Infrastructure.JournalStore Journal
+
+<PageTitle>Painel · TradeGuard</PageTitle>
+
+@{
+    var s = Engine.State;
+    var st = StatusText.From(s);
+    var r = s.Reading;
+    var f = s.Flow;
+    // A frase do robô só faz sentido quando dá para operar; senão a barra mostra o status (desconectado, travado, em operação).
+    // Setups antigos (médias/tendência) só aparecem se algum estiver ligado; o automático usa a agenda de horários.
+    var legacy = s.Settings.EnabledSetups.Any(x => SetupNames.TimeRuleOf(x) is null);
+    var showReading = legacy && s.Connected && s.CanAct && s.Position is null && s.Lock == LockReason.None && r.Steps.Count > 0;
+    var schedule = s.Schedule.Concat(Others.All.SelectMany(e => e.State.Schedule)).OrderBy(x => x.At).ThenBy(x => x.Instrument).ToList();
+    var next = schedule.FirstOrDefault(x => x.State == "aguardando");
+    var showAgenda = !legacy && s.Connected && s.CanAct && s.Position is null && s.Lock == LockReason.None && schedule.Count > 0;
+    var shadow = ShadowLearning.Status;
+    var todayTooltip = TodayTooltip(s);
+    var tradesTooltip = TradesTooltip(s);
+    var weekTooltip = PeriodTooltip("Semana", B3Clock.WeekStart(s.TradingDay), s.TradingDay, s.WeekPnl);
+    var weekStart = B3Clock.WeekStart(s.TradingDay);
+    // Mês = últimos 30 dias corridos (inclui o mês anterior na virada); a trava mensal continua por mês do calendário.
+    var monthStart = s.TradingDay.AddDays(-29);
+    var monthPnl = _history.Where(t => t.TradingDay >= monthStart && t.TradingDay <= s.TradingDay && t.CountsForLimits).Sum(t => t.PnlMoney)
+                   + (s.DayRealized - _history.Where(t => t.TradingDay == s.TradingDay && t.CountsForLimits).Sum(t => t.PnlMoney));
+    var monthTooltip = PeriodTooltip("Mês · últimos 30 dias", monthStart, s.TradingDay, monthPnl);
+}
+
+<div class="tg-dash">
+    @* ---------- Barra única: status + frase do robô + tendência + conta ---------- *@
+    @if (s.PendingSignal is { } sig)
+    {
+        <section class="tg-dash-bar tg-reading-main @(sig.Signal.Side == Side.Buy ? "buy" : "sell")">
+            <span class="tg-reading-arrow" aria-hidden="true">@(sig.Signal.Side == Side.Buy ? "▲" : "▼")</span>
+            <div class="me-auto">
+                <div class="tg-reading-headline">Sinal de @(sig.Signal.Side == Side.Buy ? "compra" : "venda") · @sig.Signal.Setup</div>
+                <div class="tg-reading-sub">@sig.Signal.Reason</div>
+            </div>
+            <button class="btn btn-ghost btn-sm" @onclick="() => Do(UiAction.DismissSignal)">Ignorar</button>
+            <button class="@(sig.Signal.Side == Side.Buy ? "tg-btn-buy" : "tg-btn-sell") tg-btn-inline" @onclick="() => Do(UiAction.ConfirmSignal)">Confirmar</button>
+        </section>
+    }
+    else if (showAgenda)
+    {
+        <section class="tg-dash-bar tg-reading-main" data-test="agenda-topo">
+            <span class="tg-reading-arrow" aria-hidden="true">⏱</span>
+            <div class="me-auto">
+                <div class="tg-reading-headline">@(next is null ? "Automático · regras de hoje encerradas" : $"Automático · próxima regra às {next.At:HH\\:mm}: {next.Rule}")</div>
+                <div class="tg-reading-sub">@(next?.Detail ?? "Amanhã o robô recomeça sozinho. Posições abertas saem no horário de cada regra.")</div>
+            </div>
+            <span class="tg-state">@st.Headline</span>
+            @AccountChip(s)
+        </section>
+    }
+    else if (showReading)
+    {
+        <section class="tg-dash-bar tg-reading-main @ToneCss(r.Tone)">
+            <span class="tg-reading-arrow" aria-hidden="true">@Arrow(r)</span>
+            <div class="me-auto">
+                <div class="tg-reading-headline">@r.Headline</div>
+                @if (r.Subline is not null) { <div class="tg-reading-sub">@r.Subline</div> }
+            </div>
+            <span class="tg-state" title="Situação do robô">@st.Headline</span>
+            <span class="tg-trend @TrendCss(r.Trend)" title="Tendência pela linha branca do gráfico (média lenta).">TENDÊNCIA: @TrendText(r.Trend)</span>
+            @AccountChip(s)
+        </section>
+    }
+    else
+    {
+        <section class="tg-dash-bar tg-status @st.Tone">
+            <span class="tg-dot @(st.Tone is "success" or "primary" ? "live" : "")"></span>
+            <div class="me-auto">
+                <div class="tg-status-head">@st.Headline</div>
+                @if (st.Detail is not null) { <div class="tg-status-detail">@st.Detail</div> }
+            </div>
+            @if (r.Steps.Count > 0) { <span class="tg-trend @TrendCss(r.Trend)">TENDÊNCIA: @TrendText(r.Trend)</span> }
+            @AccountChip(s)
+        </section>
+    }
+
+    @if (shadow.ReviewReady || shadow.State is "demo_canary" or "demo_champion" or "rolled_back")
+    {
+        <section class="tg-note @(shadow.State == "rolled_back" ? "warn" : "ok")" style="grid-column: 1 / -1" data-test="filtro-sombra-pronto">
+            <b>@shadow.Headline.</b> @shadow.Detail
+            <a class="btn btn-ghost btn-sm ms-2" href="verificacao">Ver evidências</a>
+        </section>
+    }
+
+    @* ---------- Coluna 1: operar + resultado do dia ---------- *@
+    <div class="tg-dash-col">
+        <div class="tg-card">
+            @if (s.Position is { } p)
+            {
+                <div class="d-flex justify-content-between align-items-start">
+                    <div class="tg-label">@(p.Side == Side.Buy ? "Comprado" : "Vendido") · @p.Contracts contrato(s)</div>
+                    @if (s.Quote is { } q) { <div class="text-end"><div class="tg-label">Preço</div><div class="tg-mid">@q.Last.ToString("0.0")</div></div> }
+                </div>
+                <div class="tg-pnl-summary" data-test="pnl-estimate" title="Estimativa durante a posição. O valor efetivo vem do MT5 após o fechamento.">
+                    <div class="tg-label">Líquido estimado ⓘ</div>
+                    <div class="tg-big @(p.EstimatedNetPnl >= 0 ? "pos" : "neg")">R$ @p.EstimatedNetPnl.ToString("+0.00;-0.00")</div>
+                    <div class="tg-pnl-breakdown">
+                        <span>Bruto <b>R$ @p.FloatingPnl.ToString("+0.00;-0.00")</b></span>
+                        <span>Custos estimados <b>− R$ @p.EstimatedCosts.ToString("0.00")</b></span>
+                    </div>
+                </div>
+                <div class="tg-kv"><span>Entrada</span><span>@p.Entry.ToString("0.0")</span></div>
+                <div class="tg-kv"><span title="Onde o robô sai no prejuízo (ou no zero, depois do break-even).">Stop ⓘ</span>
+                    <span>@p.Stop.ToString("0.0")@(p.BreakevenDone ? " · break-even" : "")</span></div>
+                <div class="tg-kv"><span>Alvo</span><span>@p.Target.ToString("0.0")</span></div>
+                <div class="tg-kv"><span>Risco inicial</span><span>R$ @p.InitialRiskMoney.ToString("0.00")</span></div>
+                <div class="tg-kv"><span title="Maximum Favorable / Adverse Excursion: o máximo que andou a favor e contra.">MFE · MAE ⓘ</span><span>+@p.MfePoints / -@p.MaePoints pts</span></div>
+                <div class="tg-kv"><span>Origem</span><span>@p.Source</span></div>
+                <div class="d-flex gap-2 mt-2">
+                    <button class="btn btn-ghost flex-fill" @onclick="() => Do(UiAction.CloseAll)">Zerar posição</button>
+                    <button class="btn btn-danger-ghost flex-fill" title="Zera e encerra o dia." @onclick="() => Do(UiAction.Panic)">Pânico</button>
+                </div>
+            }
+            else
+            {
+                <div class="d-flex justify-content-between align-items-end mb-2">
+                    <div>
+                        <div class="tg-label">@(s.Connection?.Symbol ?? "Mini dólar")</div>
+                        <div class="tg-big">@(s.Quote is { } q ? q.Last.ToString("0.0") : "—")</div>
+                    </div>
+                    @if (s.Quote is { } q2)
+                    {
+                        <div class="text-end small muted num">compra @q2.Ask.ToString("0.0")<br />venda @q2.Bid.ToString("0.0")</div>
+                    }
+                </div>
+
+                @if (s.Connected && !s.ChecklistDone && s.Lock == LockReason.None)
+                {
+                    <div class="tg-check-day mb-2">
+                        <div class="tg-label mb-1">Antes de operar hoje</div>
+                        @for (var i = 0; i < Checklist.Length; i++)
+                        {
+                            var idx = i;
+                            <div class="form-check mb-0">
+                                <input class="form-check-input" type="checkbox" id="@($"ck{idx}")" @bind="_checks[idx]" />
+                                <label class="form-check-label small" style="color: var(--tg-text)" for="@($"ck{idx}")">@Checklist[idx]</label>
+                            </div>
+                        }
+                        <button class="btn btn-primary btn-sm mt-2 px-3" disabled="@(!_checks.All(x => x))" @onclick="() => Do(UiAction.ConfirmChecklist)">Pronto</button>
+                    </div>
+                }
+
+                @if (_confirm is { } side)
+                {
+                    <div class="tg-note warn mb-2 small" data-test="confirmar-sem-sinal">
+                        <b>Não há sinal agora.</b> Entrar por conta própria é o que mais faz iniciante perder. Conta como trade manual no Diário.
+                        <div class="d-flex gap-2 mt-2">
+                            <button class="btn btn-ghost btn-sm flex-fill" @onclick="() => _confirm = null">Esperar o sinal</button>
+                            <button class="btn btn-danger-ghost btn-sm flex-fill" @onclick="() => Enter(side, true)">@(side == UiAction.Buy ? "Comprar" : "Vender") mesmo assim</button>
+                        </div>
+                    </div>
+                }
+                <div class="tg-trade">
+                    <button class="tg-btn-buy" disabled="@(!CanEnter(s))" @onclick="() => Enter(UiAction.Buy, false)">Comprar</button>
+                    <button class="tg-btn-sell" disabled="@(!CanEnter(s))" @onclick="() => Enter(UiAction.Sell, false)">Vender</button>
+                </div>
+                <div class="d-flex justify-content-between small muted mt-2 num">
+                    <span>@s.NextContracts contrato(s)</span>
+                    <span title="Quanto você perde se o stop for atingido.">risco R$ @Risk(s) ⓘ</span>
+                    <span>stop @s.Settings.StopPoints · alvo @s.Settings.TargetPoints pts</span>
+                </div>
+            }
+            @if (_message is not null) { <div class="tg-note mt-2 small">@_message</div> }
+        </div>
+
+        <div class="tg-card">
+            <div class="d-flex justify-content-between align-items-start">
+                <div title="@todayTooltip">
+                    <div class="tg-label">Hoje</div>
+                    <div class="tg-big @(s.DayRealized > 0 ? "pos" : s.DayRealized < 0 ? "neg" : "")">R$ @s.DayRealized.ToString("+0.00;-0.00;0.00")</div>
+                </div>
+                <div class="text-end" title="@tradesTooltip">
+                    <div class="tg-label">Trades</div>
+                    <div class="tg-mid">@s.DayTrades<span class="muted" style="font-size:.9rem">/@s.Settings.MaxTradesPerDay</span></div>
+                </div>
+            </div>
+            <div class="mt-2 mb-1 d-flex justify-content-between small">
+                <span class="muted" title="Quanto da perda máxima do dia você já usou (inclui o trade aberto).">Stop diário usado ⓘ</span>
+                <span class="num">@LossUsage(s)% de R$ @s.Settings.MaxDailyLoss.ToString("0")</span>
+            </div>
+            <div class="tg-meter @(LossUsage(s) < 50 ? "ok" : "")"><span style="width:@LossUsage(s)%"></span></div>
+            <div class="tg-kv mt-2" title="@weekTooltip"><span>Semana <span class="muted small">@weekStart.ToString("dd/MM")–@s.TradingDay.ToString("dd/MM")</span></span><span class="@(s.WeekPnl < 0 ? "neg" : "")">R$ @s.WeekPnl.ToString("0.00")</span></div>
+            <div class="tg-kv" title="@monthTooltip"><span>Mês <span class="muted small">@monthStart.ToString("dd/MM")–@s.TradingDay.ToString("dd/MM")</span></span><span class="@(monthPnl < 0 ? "neg" : "")">R$ @monthPnl.ToString("0.00")</span></div>
+        </div>
+
+        <div class="tg-card tg-grow">
+            <div class="tg-label mb-1">Notícias</div>
+            <div class="tg-news small tg-fill">
+                @if (s.UpcomingNews.Count == 0) { <div class="muted">Nenhuma relevante.</div> }
+                @foreach (var n in s.UpcomingNews)
+                {
+                    <div class="num"><span class="muted">@B3Clock.ToB3(n.TimeUtc).ToString("HH:mm")</span> @n.Currency · @n.Name</div>
+                }
+            </div>
+        </div>
+    </div>
+
+    @* ---------- Coluna 2: o que falta para o sinal + fluxo ---------- *@
+    <div class="tg-dash-col">
+        @if (schedule.Count > 0)
+        {
+            <div class="tg-card" data-test="agenda">
+                <div class="tg-label mb-2" title="Estratégias aprovadas em 2 anos de dados reais. Cada uma olha o mercado no seu horário e entra sozinha se o movimento passar do limite.">Agenda do automático · hoje ⓘ</div>
+                <div class="tg-agenda">
+                    @foreach (var it in schedule)
+                    {
+                        <div class="tg-agenda-row @AgendaCss(it.State)" title="@it.Tooltip">
+                            <span class="tg-agenda-time">@it.At.ToString("HH:mm")</span>
+                            <div class="tg-agenda-body">
+                                <div><b>@it.Rule</b> <span class="tg-agenda-state">@it.State</span></div>
+                                <div class="small muted">@it.Detail · sai @it.Exit.ToString("HH:mm")</div>
+                            </div>
+                        </div>
+                    }
+                </div>
+            </div>
+        }
+        @if (legacy)
+        {
+        <div class="tg-card">
+            <div class="tg-label mb-2">O que falta para o sinal</div>
+            @if (r.Steps.Count == 0)
+            {
+                <div class="small muted">@r.Headline</div>
+            }
+            else
+            {
+                <ol class="tg-flow">
+                    @foreach (var step in r.Steps)
+                    {
+                        <li class="@StateCss(step.State)">
+                            <span class="tg-flow-ico" aria-hidden="true">@Icon(step.State)</span>
+                            <div>
+                                <div class="tg-flow-title">@step.Title</div>
+                                <div class="tg-flow-detail">@step.Detail</div>
+                            </div>
+                        </li>
+                    }
+                </ol>
+            }
+        </div>
+        }
+
+        <div class="tg-card" data-test="fluxo">
+            <div class="d-flex justify-content-between align-items-baseline">
+                <div class="tg-label" title="Tape reading: quem está agredindo no Times & Trades (comprando ou vendendo a mercado) e o que está esperando no book.">Fluxo agora · tape reading ⓘ</div>
+                <div class="small muted">filtro @(s.Settings.FlowFilterEnabled ? "ligado" : "desligado")</div>
+            </div>
+            @if (!f.HasData)
+            {
+                <div class="muted small mt-1">@f.Headline @f.Detail</div>
+            }
+            else
+            {
+                <div class="tg-flow-head mt-1 @(f.Bias == FlowBias.Buyers ? "buy" : f.Bias == FlowBias.Sellers ? "sell" : "")">
+                    @(f.Bias == FlowBias.Buyers ? "▲" : f.Bias == FlowBias.Sellers ? "▼" : "↔") @f.Headline
+                </div>
+                <div class="tg-flow-bar mt-2" title="Volume agredido no último minuto: compra (azul) × venda (vermelho).">
+                    @{ var total = f.BuyVolume1m + f.SellVolume1m; var pct = total == 0 ? 50 : (int)(f.BuyVolume1m / total * 100); }
+                    <span class="buy" style="width:@pct%"></span><span class="sell" style="width:@(100 - pct)%"></span>
+                </div>
+                <div class="d-flex justify-content-between small muted mt-1 num">
+                    <span>compra @f.BuyVolume1m.ToString("0")</span><span>último minuto</span><span>venda @f.SellVolume1m.ToString("0")</span>
+                </div>
+                <div class="tg-flow-stats mt-2 small num">
+                    <div title="Saldo de agressão (delta): contratos agredidos na compra menos na venda nos últimos 5 segundos. É o que o filtro de fluxo confere no rompimento.">
+                        <span class="muted">Saldo 5 s ⓘ</span><b class="@(f.Delta5s > 0 ? "pos" : f.Delta5s < 0 ? "neg" : "")">@f.Delta5s.ToString("+0;-0;0")</b>
+                    </div>
+                    <div title="Saldo de agressão acumulado no dia (delta acumulado).">
+                        <span class="muted">Saldo do dia ⓘ</span><b class="@(f.DeltaDay > 0 ? "pos" : f.DeltaDay < 0 ? "neg" : "")">@f.DeltaDay.ToString("+0;-0;0")</b>
+                    </div>
+                    <div title="Negócios entre os 1% maiores do dia (a partir de @f.BigLot.ToString("0") contratos), no último minuto. O MT5 não mostra a corretora; lote grande é o sinal de player grande.">
+                        <span class="muted">Lotes grandes ⓘ</span><b>@f.BigBuys1m C · @f.BigSells1m V</b>
+                    </div>
+                    <div title="Book: volume esperando nos 5 melhores preços de compra × venda.">
+                        <span class="muted">Book ⓘ</span><b>@(f.BookImbalance is { } im ? im > 0.2m ? "mais compra" : im < -0.2m ? "mais venda" : "equilibrado" : "—")</b>
+                    </div>
+                </div>
+                @if (f.Absorption != FlowBias.Neutral)
+                {
+                    <div class="tg-note warn mt-2 small">@(f.Absorption == FlowBias.Buyers ? "Absorção compradora: vendedores agridem e o preço não cai — alguém grande está comprando." : "Absorção vendedora: compradores agridem e o preço não sobe — alguém grande está vendendo.")</div>
+                }
+            }
+        </div>
+    </div>
+
+    @* ---------- Coluna 3: mini índice + registro ---------- *@
+    <div class="tg-dash-col">
+        @foreach (var other in Others.All)
+        {
+            var o = other.State;
+            <div class="tg-card" data-test="motor-@other.Label.ToLowerInvariant()">
+                <div class="d-flex justify-content-between align-items-center">
+                    <div class="tg-label">@(other.Label == "WIN" ? "Mini índice (WIN)" : other.Label)</div>
+                    <span class="small @(o.Connected ? "" : "neg")">@(o.Connected ? $"{o.Connection?.Symbol} · conectado" : "aguardando o gráfico no MT5")</span>
+                </div>
+                @if (o.Position is { } op)
+                {
+                    <div class="d-flex justify-content-between align-items-start mt-1 gap-2">
+                        <div class="flex-grow-1">
+                            <div class="small muted">@(op.Side == Side.Buy ? "Comprado" : "Vendido") · @op.Contracts ctr · entrada @op.Entry.ToString("0") · stop @op.Stop.ToString("0")</div>
+                            <div class="tg-pnl-summary compact" data-test="pnl-estimate" title="Estimativa durante a posição. O valor efetivo vem do MT5 após o fechamento.">
+                                <div class="tg-label">Líquido estimado ⓘ</div>
+                                <div class="tg-mid @(op.EstimatedNetPnl >= 0 ? "pos" : "neg")">R$ @op.EstimatedNetPnl.ToString("+0.00;-0.00")</div>
+                                <div class="tg-pnl-breakdown">
+                                    <span>Bruto <b>R$ @op.FloatingPnl.ToString("+0.00;-0.00")</b></span>
+                                    <span>Custos <b>− R$ @op.EstimatedCosts.ToString("0.00")</b></span>
+                                </div>
+                            </div>
+                        </div>
+                        <button class="btn btn-ghost btn-sm mt-4" @onclick="() => other.RequestAsync(UiAction.CloseAll)">Zerar</button>
+                    </div>
+                }
+                else
+                {
+                    <div class="d-flex justify-content-between align-items-end mt-1">
+                        <div class="tg-mid">@(o.Quote is { } oq ? oq.Last.ToString("0") : "—")</div>
+                        <div class="small muted text-end">sem posição<br />@(o.ArmedSetups.Count > 0 ? "sinal armado" : "esperando o horário das regras")</div>
+                    </div>
+                }
+                @if (o.Log.FirstOrDefault() is { } ol)
+                {
+                    <div class="small muted mt-1 text-truncate" title="@ol.Text">@B3Clock.ToB3(ol.AtUtc).ToString("HH:mm") @ol.Text</div>
+                }
+            </div>
+        }
+
+        <div class="tg-card tg-grow">
+            <div class="tg-label">Registro</div>
+            <div class="small muted mb-2">
+                último candle <b style="color:var(--tg-text)">@(s.LastCandleUtc is { } lc ? B3Clock.ToB3(lc).ToString("HH:mm") : "—")</b>
+                · @ModeName(s.Settings.Mode) · setups: @string.Join(", ", s.Settings.EnabledSetups)
+            </div>
+            <div class="tg-log">
+                @foreach (var l in s.Log.Take(120))
+                {
+                    <div class="@l.Level"><time>@B3Clock.ToB3(l.AtUtc).ToString("HH:mm:ss")</time>@l.Text</div>
+                }
+            </div>
+        </div>
+    </div>
+</div>
+
+@code {
+    private static readonly string[] Checklist =
+    [
+        "Sei meu stop e minha perda máxima de hoje",
+        "Vi as notícias do dia (ao lado)",
+        "Estou descansado e sem pressa de recuperar nada"
+    ];
+
+    private readonly bool[] _checks = new bool[Checklist.Length];
+    private List<TradeRecord> _history = [];
+    private string? _message;
+    private DateTimeOffset _messageAt;
+    private UiAction? _confirm;
+
+    protected override async Task OnInitializedAsync()
+    {
+        Engine.Changed += OnChanged;
+        foreach (var e in Others.All) e.Changed += OnChanged;
+        TradingEngine.AnyTradeClosed += OnTradeClosed;
+        _history = await Journal.AllTradesAsync();
+    }
+
+    private void OnTradeClosed(TradingEngine source) => _ = InvokeAsync(async () =>
+    {
+        _history = await Journal.AllTradesAsync();
+        StateHasChanged();
+    });
+
+    private void OnChanged() => InvokeAsync(() =>
+    {
+        // Resposta de botão ("Zerando.", "Ordem enviada.") é momentânea: some depois de 8 s.
+        if (_message is not null && DateTimeOffset.UtcNow - _messageAt > TimeSpan.FromSeconds(8)) _message = null;
+        StateHasChanged();
+    });
+
+    public void Dispose()
+    {
+        Engine.Changed -= OnChanged;
+        foreach (var e in Others.All) e.Changed -= OnChanged;
+        TradingEngine.AnyTradeClosed -= OnTradeClosed;
+    }
+
+    private static bool CanEnter(EngineState s) => s.CanAct && s.Blocks.Count == 0;
+
+    private async Task Do(UiAction action)
+    {
+        _message = await Engine.RequestAsync(action);
+        _messageAt = DateTimeOffset.UtcNow;
+    }
+
+    // No semiautomático o robô é quem aponta a entrada: clicar sem sinal pede confirmação (evita entrada por impulso).
+    private async Task Enter(UiAction side, bool confirmed)
+    {
+        if (!confirmed && Engine.State.Settings.Mode != TradingMode.Assistant && Engine.State.PendingSignal is null)
+        {
+            _confirm = side;
+            return;
+        }
+        _confirm = null;
+        await Do(side);
+    }
+
+    private static RenderFragment AccountChip(EngineState s) => __builder =>
+    {
+        if (s.Connection is { } c)
+        {
+            <span class="tg-chip @(c.IsDemo ? "demo" : "real")">@(c.IsDemo ? "Simulador" : "Conta real")</span>
+        }
+    };
+
+    private static string ModeName(TradingMode m) => m switch
+    {
+        TradingMode.SemiAuto => "semiautomático (avisa e você confirma)",
+        TradingMode.Auto => "automático",
+        _ => "assistente (sem avisos)"
+    };
+
+    private static string AgendaCss(string state) => state switch
+    {
+        "operou" => "done", "sinal" => "signal", "fora" => "blocked", "não operou" => "blocked", "aguardando" => "waiting", _ => "idle"
+    };
+
+    private static string TrendText(Trend t) => t switch { Trend.Up => "ALTA ▲", Trend.Down => "BAIXA ▼", _ => "LATERAL ↔" };
+    private static string TrendCss(Trend t) => t switch { Trend.Up => "up", Trend.Down => "down", _ => "" };
+    private static string ToneCss(ReadingTone t) => t switch { ReadingTone.Buy => "buy", ReadingTone.Sell => "sell", ReadingTone.Blocked => "blocked", _ => "" };
+    private static string Arrow(MarketReading r) => r.Tone == ReadingTone.Blocked ? "✕" : r.Trend switch { Trend.Up => "▲", Trend.Down => "▼", _ => "↔" };
+    private static string StateCss(StepState s) => s switch { StepState.Ok => "ok", StepState.Waiting => "wait", StepState.Blocked => "block", _ => "idle" };
+    private static string Icon(StepState s) => s switch { StepState.Ok => "✓", StepState.Waiting => "…", StepState.Blocked => "✕", _ => "–" };
+
+    private static string Risk(EngineState s) =>
+        s.Instrument is null ? "—" : s.Instrument.Money(s.Settings.StopPoints, s.NextContracts).ToString("0");
+
+    private static int LossUsage(EngineState s)
+    {
+        var used = -Math.Min(0, s.DayRealized + (s.Position?.FloatingPnl ?? 0));
+        return s.Settings.MaxDailyLoss <= 0 ? 0 : (int)Math.Min(100, used / s.Settings.MaxDailyLoss * 100);
+    }
+
+    private string TodayTooltip(EngineState s)
+    {
+        var summary = PeriodTooltip("Hoje", s.TradingDay, s.TradingDay, s.DayRealized);
+        var lines = _history.Where(t => t.TradingDay == s.TradingDay && t.CountsForLimits)
+            .OrderBy(t => t.OpenedAtUtc)
+            .Select(t => $"{B3Clock.ToB3(t.OpenedAtUtc):HH:mm} {ShortSymbol(t.Symbol)} {(t.Side == Side.Buy ? "compra" : "venda")} {t.Contracts}: " +
+                         $"R$ {t.PnlMoney:+0.00;-0.00;0.00} ({t.RMultiple:+0.0;-0.0;0.0}R) · {t.ExitReason}")
+            .ToList();
+        return lines.Count == 0 ? summary + "\nNenhuma operação fechada." : summary + "\n\n" + string.Join("\n", lines);
+    }
+
+    private string TradesTooltip(EngineState s)
+    {
+        var remaining = Math.Max(0, s.Settings.MaxTradesPerDay - s.DayTrades);
+        return $"{s.DayTrades} operação(ões) contabilizada(s) hoje\nLimite: {s.Settings.MaxTradesPerDay} · restantes: {remaining}\n" +
+               $"Perdas consecutivas: {s.ConsecutiveLosses}";
+    }
+
+    private string PeriodTooltip(string label, DateOnly from, DateOnly to, decimal reportedPnl)
+    {
+        var trades = _history.Where(t => t.TradingDay >= from && t.TradingDay <= to && t.CountsForLimits).ToList();
+        var wins = trades.Where(t => t.PnlMoney > 0).ToList();
+        var losses = trades.Where(t => t.PnlMoney < 0).ToList();
+        var grossWin = wins.Sum(t => t.PnlMoney);
+        var grossLoss = -losses.Sum(t => t.PnlMoney);
+        var average = trades.Count == 0 ? 0 : trades.Average(t => t.PnlMoney);
+        var withRisk = trades.Where(t => t.InitialRiskMoney > 0).ToList(); // importados do MT5 não têm risco: sem R
+        var averageR = withRisk.Count == 0 ? 0 : withRisk.Average(t => t.RMultiple);
+        var best = trades.OrderByDescending(t => t.PnlMoney).FirstOrDefault();
+        var worst = trades.OrderBy(t => t.PnlMoney).FirstOrDefault();
+        var result = reportedPnl > 0 ? "lucro" : reportedPnl < 0 ? "prejuízo" : "zero";
+        var range = from == to ? from.ToString("dd/MM") : $"{from:dd/MM}–{to:dd/MM}";
+        var text = $"{label} · {range}\nResultado: {result} de R$ {Math.Abs(reportedPnl):0.00}\n" +
+                   $"{trades.Count} trades · {wins.Count} ganhos · {losses.Count} perdas\n" +
+                   $"Ganhou R$ {grossWin:0.00} · perdeu R$ {grossLoss:0.00}\n" +
+                   $"Média R$ {average:+0.00;-0.00;0.00}/trade · {averageR:+0.00;-0.00;0.00}R";
+        if (best is not null)
+            text += $"\nMelhor R$ {best.PnlMoney:+0.00;-0.00;0.00} · pior R$ {worst!.PnlMoney:+0.00;-0.00;0.00}";
+        return text;
+    }
+
+    private static string ShortSymbol(string symbol) => symbol.Length >= 3 ? symbol[..3].ToUpperInvariant() : symbol;
+}

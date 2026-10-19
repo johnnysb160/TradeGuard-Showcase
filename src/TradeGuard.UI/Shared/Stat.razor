@@ -1,0 +1,12 @@
+<div class="col-6 col-md-3">
+    <div class="tg-card h-100 py-3" title="@Hint">
+        <div class="tg-label">@Title@(Hint is null ? "" : " ⓘ")</div>
+        <div class="tg-mid mt-1">@Value</div>
+    </div>
+</div>
+
+@code {
+    [Parameter] public string Title { get; set; } = "";
+    [Parameter] public string Value { get; set; } = "";
+    [Parameter] public string? Hint { get; set; }
+}
