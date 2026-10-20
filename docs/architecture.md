@@ -2,7 +2,7 @@
 
 ## Design objective
 
-TradeGuard is designed around a stronger invariant than “the strategy generated a signal”: no order may bypass health checks, portfolio limits, mandatory protection, auditability, and simulator/real-account gates.
+TradeGuard is designed around a stronger invariant than “the strategy generated a signal”: no demo or real-account order may bypass health checks, portfolio limits, mandatory protection, auditability, and account-authorization gates.
 
 ## Runtime components
 
@@ -65,6 +65,10 @@ Before an order is sent, TradeGuard persists the setup, initial risk, stop, targ
 | Persistence | Versioned settings, day locks, journal, recovery context |
 | UI | Clear operating state; no hidden safety bypass |
 
+## Real-account authority
+
+The bridge and Expert Advisor implement actual broker-side order operations: open, modify stop/target, reduce, and close. Real execution is intentionally a separate permission from strategy automation. TradeGuard requires an allowed account type, persisted operational evidence, healthy WDO/WIN channels, available audit storage, and the same risk checks used in simulation before an order can reach MT5. The Expert Advisor independently rejects unauthorized real-account commands and keeps local emergency protections active if the desktop process disappears.
+
 ## Research discipline
 
 The system separates candidate research from operational authorization. Historical replay, chronological splits, live parity checks, and a shadow-only probabilistic filter may produce evidence, but they cannot silently enable real-money trading or increase risk.
@@ -74,4 +78,3 @@ The system separates candidate research from operational authorization. Historic
 - A Windows-only host enables tight MT5 and DPAPI integration but reduces platform portability.
 - Serialized queues prioritize correctness and auditability over maximum throughput, which is appropriate for the instruments and rule cadence.
 - SQLite keeps local operation simple; it also makes backup, disk-health checks, and corruption containment part of the application contract.
-

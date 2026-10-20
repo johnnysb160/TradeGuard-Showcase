@@ -5,19 +5,43 @@
 ![WPF](https://img.shields.io/badge/WPF-Blazor%20Hybrid-5C2D91)
 ![MQL5](https://img.shields.io/badge/MQL5-MetaTrader%205-0696D7)
 
-TradeGuard is a Windows risk-and-execution platform for B3 mini futures. It combines a WPF + Blazor Hybrid desktop application, a deterministic trading engine, an authenticated named-pipe bridge, and an MQL5 Expert Advisor for MetaTrader 5.
+TradeGuard is a real-operation risk and execution platform for B3 mini futures. It can open, modify, reduce, manage, and close WDO and WIN positions in MetaTrader 5 through an MQL5 Expert Advisor, while a .NET desktop application coordinates strategy decisions, operator commands, portfolio risk, recovery, and auditability.
 
-> **Simulation-first project.** The public snapshot defaults to simulator-safe behavior and is published as an engineering case study, not as financial advice or a promise of trading performance. Broker accounts, credentials, live data, logs, and private research datasets are not included.
+Real-account execution is a first-class capability, protected by an explicit authorization and operational-qualification gate. The simulator is an additional environment for setup validation, failure drills, and safe rollout; it is not the definition of the product. The public snapshot contains no broker account, credentials, live market history, operational logs, or private research data and makes no claim of future trading performance.
 
 ## Product snapshot
 
-![TradeGuard simulator dashboard](docs/images/dashboard-simulator.png)
+![TradeGuard operator dashboard during a simulator session](docs/images/dashboard-simulator.png)
 
-The dashboard keeps price, portfolio risk, scheduled rules, market flow, positions, news, and the audit trail visible on one screen. The color system avoids green: blue represents buy/profit, red represents sell/loss, amber represents attention, and violet represents interface state.
+The screenshot records one simulator session. The same operator dashboard is used to supervise terminal connectivity, the active account type, WDO/WIN prices, open positions, realized and floating P&L, daily risk consumption, scheduled strategies, economic news, tape-reading signals, and the chronological execution log.
+
+## What the system does
+
+TradeGuard covers the full operating cycle instead of stopping at signal generation:
+
+1. **Connects to MetaTrader 5.** Per-instrument Expert Advisors stream quotes, candles, trades, book data, news, account state, positions, and execution reports through authenticated local pipes.
+2. **Coordinates three operating modes.** In Assistant mode the operator enters and the system manages risk; in Semi-Auto it proposes and waits for confirmation; in Auto the approved strategy portfolio can execute without a click. Account authorization and automatic-strategy authorization are independent gates.
+3. **Evaluates market and portfolio state.** Each WDO and WIN event is serialized, then checked against connectivity, broker and algo-trading health, audit storage, account type, current contract, spread, news windows, operating hours, open positions, and combined floating P&L.
+4. **Executes protected orders.** Accepted entries carry a mandatory stop and target. The system can subsequently move protection, take partial exits, reduce excess size, or flatten the position.
+5. **Manages the complete trade.** Break-even, stepped profit locks, fixed or previous-candle trailing stops, maximum holding time, pyramiding, controlled averaging, and scheduled exits all remain inside the original risk envelope.
+6. **Closes the operational loop.** Trades, decisions, locks, settings, and recovery context are persisted. After a restart, TradeGuard reconciles its state with MT5 history and reconstructs missing records without duplicating positions.
+
+## Product depth
+
+| Area | Capabilities |
+|---|---|
+| Execution | Real or demo MT5 accounts; buy/sell; stop-loss and take-profit; modify, partial reduce, and close-all commands |
+| Strategy portfolio | Eleven scheduled WDO/WIN rules using day movement, 30/60-minute movement, distance from the daily mean, ADR-normalized thresholds, and defined exit times |
+| Decision modes | Operator-led Assistant, one-click Semi-Auto confirmation, and separately qualified Auto execution |
+| Market reading | Times & Trades aggressor balance, absorption detection, book depth, candle history, daily levels, trend, spread, and high-impact news windows |
+| Position management | Risk-based sizing, break-even, partials, profit-lock steps, trailing stops, time exits, pyramiding, and constrained averaging |
+| Risk governance | Mandatory stops; daily, weekly, and monthly loss limits; daily target; profit give-back; trade and consecutive-loss caps; cooldown; forced end-of-day flattening |
+| Operations | WDO/WIN portfolio coordination, authenticated IPC, terminal discovery, health checks, persistent day locks, reconnect/recovery, backups, and an operator verification screen |
+| Evidence | Automatic journal, equity curve, statistics per setup, candle replay, live-vs-replay parity checks, decision traces, and shadow-only probabilistic learning |
 
 ## The engineering problem
 
-Automating order execution is the easy part. The hard part is guaranteeing that every decision remains bounded, auditable, recoverable after restarts, and unable to silently promote a simulated strategy into real-money operation.
+Sending an order is straightforward. The difficult part is proving that every real-money decision is bounded, observable, recoverable after restarts, and unable to bypass the operator's risk policy.
 
 TradeGuard treats those constraints as the product:
 
@@ -27,8 +51,9 @@ TradeGuard treats those constraints as the product:
 - **Independent fail-safes** in both the .NET application and MQL5 Expert Advisor.
 - **Crash recovery** for position context, trade reconstruction, stops, and scheduled decisions.
 - **Causal replay and parity audits** comparing live decisions with reproducible historical inputs.
-- **Explicit real-account gate** requiring operational evidence; configuration alone cannot enable it.
-- **Simulation-only execution test** excluded from performance statistics.
+- **Explicit real-account gate** requiring operational evidence; a configuration edit alone cannot enable it.
+- **Separated rollout gates:** simulator evidence can qualify a strategy without silently granting authority over a real account.
+- **Anti-tilt settings policy:** tighter limits apply immediately, while risk-increasing changes wait until the next trading session.
 
 ## Architecture
 
@@ -82,7 +107,7 @@ docs/                          Public architecture and security notes
 
 ## Build and test
 
-Prerequisites: Windows 10/11 and the .NET 10 SDK. MetaTrader 5 is required only for live simulator integration, not for the automated test suite.
+Prerequisites: Windows 10/11 and the .NET 10 SDK. MetaTrader 5 is required for terminal integration with demo or real accounts, but not for the automated test suite.
 
 ```powershell
 dotnet restore TradeGuard.slnx
@@ -96,7 +121,7 @@ To explore the desktop host locally:
 dotnet run --project src/TradeGuard.Desktop
 ```
 
-Keep `AllowRealAccount` disabled and use a MetaTrader demo account. Never place broker credentials in this repository.
+For local evaluation, keep `AllowRealAccount` disabled and use a MetaTrader demo account. Real-account operation exists in the product but must only be enabled after its qualification checklist and with credentials supplied outside the repository.
 
 ## Safety model
 
@@ -106,7 +131,7 @@ flowchart TD
   Health -- No --> Block[Block and audit]
   Health -- Yes --> Limits{Risk limits satisfied?}
   Limits -- No --> Lock[Persist lock and flatten if required]
-  Limits -- Yes --> Account{Simulator or qualified pilot?}
+  Limits -- Yes --> Account{Demo or explicitly qualified real account?}
   Account -- No --> Block
   Account -- Yes --> Order[Order with mandatory stop]
   Order --> Recover[Persist recovery context]
@@ -126,4 +151,3 @@ The MQL5 side refuses orders without stops, can reject real accounts independent
 ## Source availability
 
 This repository is published for portfolio review. No open-source license is granted unless a license file is added later.
-
